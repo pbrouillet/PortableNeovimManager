@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::config::{self, LEADER_KEY_OPTIONS};
 
-use super::app::{App, Screen};
+use super::app::{App, FeatureCursorItem, Screen};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     match &app.screen {
@@ -72,7 +72,7 @@ fn draw_instance_list(frame: &mut Frame, app: &App) {
         .enumerate()
         .map(|(i, inst)| {
             let features_str = inst
-                .features
+                .workloads
                 .iter()
                 .map(|f| f.to_string())
                 .collect::<Vec<_>>()
@@ -156,7 +156,7 @@ fn draw_instance_detail(frame: &mut Frame, app: &App, name: &str) {
     let instance = app.instances.iter().find(|i| i.name == name);
     let body = if let Some(inst) = instance {
         let features_str = inst
-            .features
+            .workloads
             .iter()
             .map(|f| f.to_string())
             .collect::<Vec<_>>()
@@ -255,20 +255,43 @@ fn draw_edit_features(frame: &mut Frame, app: &App, name: &str) {
     .block(Block::new().borders(Borders::ALL));
     frame.render_widget(header, chunks[0]);
 
-    // Checkbox list
-    let rows: Vec<Row> = app
-        .feature_checkboxes
+    // Build rows from hierarchical workload/feature model
+    let items = app.visible_feature_items();
+    let rows: Vec<Row> = items
         .iter()
         .enumerate()
-        .map(|(i, (workload_id, enabled))| {
-            let checkbox = if *enabled { "[x]" } else { "[ ]" };
-            let workload = app.registry.find_by_id(workload_id);
-            let name = workload.map(|w| w.name.as_str()).unwrap_or(workload_id);
-            let desc = workload.map(|w| w.description.as_str()).unwrap_or("");
+        .map(|(i, item)| {
+            let (checkbox, label, desc) = match item {
+                FeatureCursorItem::Workload(wi) => {
+                    let wc = &app.workload_checkboxes[*wi];
+                    let cb = if wc.enabled {
+                        // Check if all features are enabled
+                        let all_on = wc.features.iter().all(|f| f.enabled);
+                        if all_on { "[x]" } else { "[-]" }
+                    } else {
+                        "[ ]"
+                    };
+                    let arrow = if wc.expanded { "▼" } else { "▶" };
+                    let feat_count = wc.features.len();
+                    let label = format!("{arrow} {}", wc.name);
+                    let desc = if feat_count > 1 {
+                        format!("{} ({feat_count} features)", wc.description)
+                    } else {
+                        wc.description.clone()
+                    };
+                    (cb.to_string(), label, desc)
+                }
+                FeatureCursorItem::Feature(wi, fi) => {
+                    let fc = &app.workload_checkboxes[*wi].features[*fi];
+                    let cb = if fc.enabled { "[x]" } else { "[ ]" };
+                    let label = format!("  {}", fc.name);
+                    (cb.to_string(), label, String::new())
+                }
+            };
             let row = Row::new(vec![
-                Cell::from(checkbox.to_string()),
-                Cell::from(name.to_string()),
-                Cell::from(desc.to_string()),
+                Cell::from(checkbox),
+                Cell::from(label),
+                Cell::from(desc),
             ]);
             if i == app.feature_cursor {
                 row.style(
@@ -277,23 +300,29 @@ fn draw_edit_features(frame: &mut Frame, app: &App, name: &str) {
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 )
-            } else if *enabled {
-                row.style(Style::default().fg(Color::Green))
             } else {
-                row
+                match item {
+                    FeatureCursorItem::Workload(wi) if app.workload_checkboxes[*wi].enabled => {
+                        row.style(Style::default().fg(Color::Green))
+                    }
+                    FeatureCursorItem::Feature(wi, fi) if app.workload_checkboxes[*wi].features[*fi].enabled => {
+                        row.style(Style::default().fg(Color::Green))
+                    }
+                    _ => row,
+                }
             }
         })
         .collect();
 
     let widths = [
         Constraint::Length(5),
-        Constraint::Length(12),
+        Constraint::Length(20),
         Constraint::Min(20),
     ];
 
     let header_row = Row::new(vec![
         Cell::from(""),
-        Cell::from("Feature"),
+        Cell::from("Workload / Feature"),
         Cell::from("Description"),
     ])
     .style(
@@ -323,7 +352,7 @@ fn draw_edit_features(frame: &mut Frame, app: &App, name: &str) {
     // Footer
     let footer_idx = if has_message { 3 } else { 2 };
     let footer = Paragraph::new(Line::from(vec![Span::styled(
-        " Space: Toggle | t: Tutorial | Enter: Apply & Save | Esc: Cancel ",
+        " Space: Toggle | →/l: Expand | ←/h: Collapse | t: Tutorial | Enter: Apply | Esc: Cancel ",
         Style::default().fg(Color::DarkGray),
     )]))
     .alignment(ratatui::layout::Alignment::Center)

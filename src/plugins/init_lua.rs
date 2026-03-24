@@ -4,11 +4,25 @@ use std::path::Path;
 /// Generates the full init.lua content for an instance.
 /// `data_dir` is the absolute path to the instance's data/ directory (where lazy.nvim will be cloned).
 /// `enabled_ids` are the workload IDs the user selected (optional workloads).
+/// `disabled_features` are "WorkloadId/FeatureId" paths to exclude.
+/// `extra_features` are "WorkloadId/FeatureId" paths to include even if their workload is off.
 /// Base workloads from the registry are always included.
 pub fn generate_init_lua(
     data_dir: &Path,
     registry: &WorkloadRegistry,
     enabled_ids: &[String],
+    leader_key: &str,
+) -> String {
+    generate_init_lua_full(data_dir, registry, enabled_ids, &[], &[], leader_key)
+}
+
+/// Full version with feature-level overrides.
+pub fn generate_init_lua_full(
+    data_dir: &Path,
+    registry: &WorkloadRegistry,
+    enabled_ids: &[String],
+    disabled_features: &[String],
+    extra_features: &[String],
     leader_key: &str,
 ) -> String {
     let lazy_path = data_dir.join("lazy").join("lazy.nvim");
@@ -20,21 +34,42 @@ pub fn generate_init_lua(
     let mut plugin_specs = Vec::new();
     let mut config_blocks = Vec::new();
 
+    // Helper: collect plugins/config for a workload, respecting disabled_features
+    let mut collect_workload = |workload: &crate::workload::Workload| {
+        for feature in &workload.features {
+            if !feature.default_enabled {
+                continue;
+            }
+            let path = format!("{}/{}", workload.id, feature.id);
+            if disabled_features.contains(&path) {
+                continue;
+            }
+            plugin_specs.extend(feature.plugins.iter().cloned());
+            if let Some(ref lua) = feature.config_lua {
+                config_blocks.push(lua.clone());
+            }
+        }
+    };
+
     // Always include base workloads (if not already in enabled_ids)
     for workload in registry.base() {
         if !enabled_ids.contains(&workload.id) {
-            plugin_specs.extend(workload.plugins.iter().cloned());
-            if let Some(ref lua) = workload.config_lua {
-                config_blocks.push(lua.clone());
-            }
+            collect_workload(workload);
         }
     }
 
     // Add enabled workloads
     for id in enabled_ids {
         if let Some(workload) = registry.find_by_id(id) {
-            plugin_specs.extend(workload.plugins.iter().cloned());
-            if let Some(ref lua) = workload.config_lua {
+            collect_workload(workload);
+        }
+    }
+
+    // Add extra features (from non-enabled workloads or non-default features)
+    for path in extra_features {
+        if let Some((_workload, feature)) = registry.find_feature_by_path(path) {
+            plugin_specs.extend(feature.plugins.iter().cloned());
+            if let Some(ref lua) = feature.config_lua {
                 config_blocks.push(lua.clone());
             }
         }

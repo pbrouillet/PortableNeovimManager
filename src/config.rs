@@ -45,12 +45,21 @@ fn default_leader_key() -> String {
 // InstanceManifest
 // ---------------------------------------------------------------------------
 
-/// Workload IDs enabled on this instance (e.g. ["Lsp", "Dap", "TreeView"]).
+/// Instance configuration: enabled workloads and feature overrides.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InstanceManifest {
     pub name: String,
     pub nvim_version: String,
-    pub features: Vec<String>,
+    /// Enabled workload IDs (e.g. ["Lsp", "Dap", "TreeView"]).
+    /// Alias "features" provides backward compat with old manifests.
+    #[serde(alias = "features")]
+    pub workloads: Vec<String>,
+    /// Individual features to disable within enabled workloads ("WorkloadId/FeatureId").
+    #[serde(default)]
+    pub disabled_features: Vec<String>,
+    /// Individual features to enable even when their parent workload is off.
+    #[serde(default)]
+    pub extra_features: Vec<String>,
     #[serde(default = "default_leader_key")]
     pub leader_key: String,
     pub created_at: DateTime<Utc>,
@@ -58,12 +67,14 @@ pub struct InstanceManifest {
 }
 
 impl InstanceManifest {
-    pub fn new(name: String, nvim_version: String, features: Vec<String>) -> Self {
+    pub fn new(name: String, nvim_version: String, workloads: Vec<String>) -> Self {
         let now = Utc::now();
         Self {
             name,
             nvim_version,
-            features,
+            workloads,
+            disabled_features: vec![],
+            extra_features: vec![],
             leader_key: default_leader_key(),
             created_at: now,
             updated_at: now,
@@ -221,7 +232,7 @@ mod tests {
         let loaded = InstanceManifest::load(&manifest_path).unwrap();
         assert_eq!(loaded.name, original.name);
         assert_eq!(loaded.nvim_version, original.nvim_version);
-        assert_eq!(loaded.features, original.features);
+        assert_eq!(loaded.workloads, original.workloads);
         assert_eq!(loaded.leader_key, " ");
         assert_eq!(loaded.created_at, original.created_at);
         assert_eq!(loaded.updated_at, original.updated_at);

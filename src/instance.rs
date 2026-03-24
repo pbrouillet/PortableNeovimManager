@@ -274,7 +274,7 @@ pub fn update_features(
     let manifest_path = InstanceManifest::manifest_path(&base);
     let mut manifest = InstanceManifest::load(&manifest_path)?;
 
-    manifest.features = features.clone();
+    manifest.workloads = features.clone();
     manifest.updated_at = Utc::now();
 
     // Regenerate init.lua with updated features

@@ -41,7 +41,7 @@ async fn main() {
                     );
                     println!("{}", "-".repeat(80));
                     for inst in &instances {
-                        let features_str = inst.features.join(", ");
+                        let features_str = inst.workloads.join(", ");
                         println!(
                             "{:<20} {:<15} {:<30} {}",
                             inst.name,
@@ -66,7 +66,7 @@ async fn main() {
                 Ok(inst) => {
                     println!("Name:     {}", inst.name);
                     println!("Version:  {}", inst.nvim_version);
-                    println!("Features: {}", inst.features.join(", "));
+                    println!("Features: {}", inst.workloads.join(", "));
                     println!(
                         "Created:  {}",
                         inst.created_at.format("%Y-%m-%d %H:%M:%S UTC")
@@ -121,7 +121,7 @@ async fn main() {
             let manifest_path = config::InstanceManifest::manifest_path(&dir);
             match config::InstanceManifest::load(&manifest_path) {
                 Ok(manifest) => {
-                    let mut features: Vec<String> = manifest.features.clone();
+                    let mut features: Vec<String> = manifest.workloads.clone();
                     if let Some(to_enable) = enable {
                         for f in cli::parse_features(&to_enable, &registry) {
                             if !features.contains(&f) {

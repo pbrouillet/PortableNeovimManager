@@ -27,15 +27,41 @@ pub enum Screen {
 
 // ── App state ───────────────────────────────────────────────────────────────
 
+/// A single feature checkbox within a workload.
+#[derive(Clone, Debug)]
+pub struct FeatureCheckbox {
+    pub feature_id: String,
+    pub name: String,
+    pub enabled: bool,
+}
+
+/// A workload group in the EditFeatures screen.
+#[derive(Clone, Debug)]
+pub struct WorkloadCheckbox {
+    pub workload_id: String,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub expanded: bool,
+    pub features: Vec<FeatureCheckbox>,
+}
+
+/// An item the cursor can land on in the feature list.
+#[derive(Clone, Debug)]
+pub enum FeatureCursorItem {
+    Workload(usize),
+    Feature(usize, usize),
+}
+
 pub struct App {
     pub instances: Vec<InstanceManifest>,
     pub selected: usize,
     pub screen: Screen,
     pub message: Option<String>,
     pub should_quit: bool,
-    /// Checkbox state for the EditFeatures screen: (workload_id, enabled)
-    pub feature_checkboxes: Vec<(String, bool)>,
-    /// Cursor position in the feature checkbox list
+    /// Hierarchical checkbox state for the EditFeatures screen
+    pub workload_checkboxes: Vec<WorkloadCheckbox>,
+    /// Cursor position in the visible feature list
     pub feature_cursor: usize,
     /// Cursor position in the leader key selection list
     pub leader_cursor: usize,
@@ -69,7 +95,7 @@ impl App {
             screen: Screen::InstanceList,
             message: None,
             should_quit: false,
-            feature_checkboxes: Vec::new(),
+            workload_checkboxes: Vec::new(),
             feature_cursor: 0,
             leader_cursor: 0,
             registry,
@@ -144,19 +170,48 @@ impl App {
         }
     }
 
+    /// Returns the flat list of cursor-navigable items in the current feature view.
+    pub fn visible_feature_items(&self) -> Vec<FeatureCursorItem> {
+        let mut items = Vec::new();
+        for (i, wc) in self.workload_checkboxes.iter().enumerate() {
+            items.push(FeatureCursorItem::Workload(i));
+            if wc.expanded {
+                for (j, _) in wc.features.iter().enumerate() {
+                    items.push(FeatureCursorItem::Feature(i, j));
+                }
+            }
+        }
+        items
+    }
+
     fn enter_edit_features(&mut self, name: &str) {
         let instance = self.instances.iter().find(|i| i.name == name);
-        let current_features = instance.map(|i| &i.features);
+        let enabled_workloads = instance.map(|i| &i.workloads);
 
-        self.feature_checkboxes = self
+        self.workload_checkboxes = self
             .registry
             .optional()
             .iter()
             .map(|w| {
-                let enabled = current_features
-                    .map(|feats| feats.contains(&w.id))
+                let workload_on = enabled_workloads
+                    .map(|wl| wl.contains(&w.id))
                     .unwrap_or(false);
-                (w.id.clone(), enabled)
+                WorkloadCheckbox {
+                    workload_id: w.id.clone(),
+                    name: w.name.clone(),
+                    description: w.description.clone(),
+                    enabled: workload_on,
+                    expanded: false,
+                    features: w
+                        .features
+                        .iter()
+                        .map(|f| FeatureCheckbox {
+                            feature_id: f.id.clone(),
+                            name: f.name.clone(),
+                            enabled: workload_on && f.default_enabled,
+                        })
+                        .collect(),
+                }
             })
             .collect();
         self.feature_cursor = 0;
@@ -167,48 +222,78 @@ impl App {
     }
 
     fn toggle_feature(&mut self) {
-        if let Some((workload_id, enabled)) =
-            self.feature_checkboxes.get(self.feature_cursor).cloned()
-        {
-            let new_state = !enabled;
+        let items = self.visible_feature_items();
+        let Some(item) = items.get(self.feature_cursor) else {
+            return;
+        };
 
-            if new_state {
-                // Turning ON: also enable dependencies
-                self.feature_checkboxes[self.feature_cursor].1 = true;
-                if let Some(workload) = self.registry.find_by_id(&workload_id) {
-                    for dep_id in &workload.depends_on {
-                        if let Some(pos) = self
-                            .feature_checkboxes
-                            .iter()
-                            .position(|(id, _)| id == dep_id)
+        match item {
+            FeatureCursorItem::Workload(wi) => {
+                let wc = &mut self.workload_checkboxes[*wi];
+                let new_state = !wc.enabled;
+                wc.enabled = new_state;
+                for fc in &mut wc.features {
+                    fc.enabled = new_state;
+                }
+
+                if new_state {
+                    // Enable dependencies
+                    let workload_id = wc.workload_id.clone();
+                    if let Some(workload) = self.registry.find_by_id(&workload_id) {
+                        let deps: Vec<String> = workload.depends_on.clone();
+                        for dep_id in &deps {
+                            if let Some(dep_wc) = self
+                                .workload_checkboxes
+                                .iter_mut()
+                                .find(|w| w.workload_id == *dep_id)
+                            {
+                                dep_wc.enabled = true;
+                                for fc in &mut dep_wc.features {
+                                    fc.enabled = true;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Disable dependents
+                    let workload_id = wc.workload_id.clone();
+                    let dependents = self.registry.dependents_of(&workload_id);
+                    for dep_id in &dependents {
+                        if let Some(dep_wc) = self
+                            .workload_checkboxes
+                            .iter_mut()
+                            .find(|w| w.workload_id == *dep_id)
                         {
-                            self.feature_checkboxes[pos].1 = true;
+                            dep_wc.enabled = false;
+                            for fc in &mut dep_wc.features {
+                                fc.enabled = false;
+                            }
                         }
                     }
                 }
-            } else {
-                // Turning OFF: also disable dependents
-                self.feature_checkboxes[self.feature_cursor].1 = false;
-                let dependents = self.registry.dependents_of(&workload_id);
-                for dep_id in &dependents {
-                    if let Some(pos) = self
-                        .feature_checkboxes
-                        .iter()
-                        .position(|(id, _)| id == dep_id)
-                    {
-                        self.feature_checkboxes[pos].1 = false;
-                    }
-                }
             }
+            FeatureCursorItem::Feature(wi, fi) => {
+                let wc = &mut self.workload_checkboxes[*wi];
+                wc.features[*fi].enabled = !wc.features[*fi].enabled;
+                // Update workload-level state based on feature states
+                wc.enabled = wc.features.iter().any(|f| f.enabled);
+            }
+        }
+    }
+
+    fn toggle_expand(&mut self) {
+        let items = self.visible_feature_items();
+        if let Some(FeatureCursorItem::Workload(wi)) = items.get(self.feature_cursor) {
+            self.workload_checkboxes[*wi].expanded = !self.workload_checkboxes[*wi].expanded;
         }
     }
 
     fn apply_features(&mut self, name: &str) {
         let features: Vec<String> = self
-            .feature_checkboxes
+            .workload_checkboxes
             .iter()
-            .filter(|(_, enabled)| *enabled)
-            .map(|(id, _)| id.clone())
+            .filter(|wc| wc.enabled)
+            .map(|wc| wc.workload_id.clone())
             .collect();
 
         match crate::instance::update_features(name, features, &self.registry, &self.settings) {
@@ -256,7 +341,7 @@ impl App {
                 let init_lua = crate::plugins::generate_init_lua(
                     &data_dir,
                     &self.registry,
-                    &manifest.features,
+                    &manifest.workloads,
                     &manifest.leader_key,
                 );
                 let init_lua_path = base.join("config").join("nvim").join("init.lua");
@@ -500,6 +585,7 @@ async fn handle_detail_keys(
 }
 
 fn handle_features_keys(app: &mut App, code: KeyCode, name: &str) {
+    let visible_count = app.visible_feature_items().len();
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::InstanceDetail {
@@ -508,14 +594,14 @@ fn handle_features_keys(app: &mut App, code: KeyCode, name: &str) {
             app.message = None;
         }
         KeyCode::Char('j') | KeyCode::Down => {
-            if !app.feature_checkboxes.is_empty() {
-                app.feature_cursor = (app.feature_cursor + 1) % app.feature_checkboxes.len();
+            if visible_count > 0 {
+                app.feature_cursor = (app.feature_cursor + 1) % visible_count;
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            if !app.feature_checkboxes.is_empty() {
+            if visible_count > 0 {
                 app.feature_cursor = if app.feature_cursor == 0 {
-                    app.feature_checkboxes.len() - 1
+                    visible_count - 1
                 } else {
                     app.feature_cursor - 1
                 };
@@ -524,6 +610,27 @@ fn handle_features_keys(app: &mut App, code: KeyCode, name: &str) {
         KeyCode::Char(' ') => {
             app.toggle_feature();
         }
+        KeyCode::Right | KeyCode::Char('l') => {
+            app.toggle_expand();
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            // Collapse: if on a feature, jump to its parent; if on workload, collapse it
+            let items = app.visible_feature_items();
+            if let Some(item) = items.get(app.feature_cursor) {
+                match item {
+                    FeatureCursorItem::Feature(wi, _) => {
+                        // Jump cursor to the parent workload
+                        let wi = *wi;
+                        if let Some(pos) = items.iter().position(|i| matches!(i, FeatureCursorItem::Workload(w) if *w == wi)) {
+                            app.feature_cursor = pos;
+                        }
+                    }
+                    FeatureCursorItem::Workload(wi) => {
+                        app.workload_checkboxes[*wi].expanded = false;
+                    }
+                }
+            }
+        }
         KeyCode::Enter => {
             app.apply_features(name);
             app.screen = Screen::InstanceDetail {
@@ -531,12 +638,14 @@ fn handle_features_keys(app: &mut App, code: KeyCode, name: &str) {
             };
         }
         KeyCode::Char('t') => {
-            if let Some((workload_id, _)) = app.feature_checkboxes.get(app.feature_cursor) {
+            let items = app.visible_feature_items();
+            if let Some(FeatureCursorItem::Workload(wi)) = items.get(app.feature_cursor) {
+                let workload_id = &app.workload_checkboxes[*wi].workload_id;
                 if let Some((title, content)) = app.registry.tutorial_content(workload_id) {
                     let return_to = Screen::EditFeatures { name: name.to_string() };
                     app.open_tutorial_view(title, content, return_to);
                 } else {
-                    app.message = Some("No tutorial available for this feature.".to_string());
+                    app.message = Some("No tutorial available for this workload.".to_string());
                 }
             }
         }

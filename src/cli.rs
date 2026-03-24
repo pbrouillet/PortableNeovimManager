@@ -60,7 +60,7 @@ pub enum Commands {
     Features {
         /// Instance name
         name: String,
-        /// Features to enable (comma-separated)
+        /// Features to enable (comma-separated). Use @preset for presets (e.g. @ide-core).
         #[arg(long, value_delimiter = ',')]
         enable: Option<Vec<String>>,
         /// Features to disable (comma-separated)
@@ -78,15 +78,28 @@ pub enum Commands {
     Tui,
 }
 
+/// Resolves feature/workload identifiers to workload IDs.
+/// Supports:
+///   - Workload aliases (e.g. "lsp", "dap", "treeview")
+///   - @preset syntax (e.g. "@ide-core" → all workloads in that preset)
+///   - Direct workload IDs (e.g. "Lsp")
 pub fn parse_features(features: &[String], registry: &WorkloadRegistry) -> Vec<String> {
     features
         .iter()
-        .filter_map(|f| {
+        .flat_map(|f| {
+            if let Some(preset_id) = f.strip_prefix('@') {
+                if let Some(preset) = registry.find_preset(preset_id) {
+                    return preset.workloads.clone();
+                } else {
+                    eprintln!("Warning: unknown preset '@{preset_id}', skipping");
+                    return vec![];
+                }
+            }
             if let Some(workload) = registry.find_by_alias(f) {
-                Some(workload.id.clone())
+                vec![workload.id.clone()]
             } else {
                 eprintln!("Warning: unknown feature '{f}', skipping");
-                None
+                vec![]
             }
         })
         .collect()
@@ -183,5 +196,38 @@ mod tests {
             .collect();
         let result = parse_features(&input, &reg);
         assert_eq!(result, vec!["Lsp", "Lsp", "Lsp"]);
+    }
+
+    #[test]
+    fn test_parse_features_preset() {
+        let reg = default_registry();
+        let input: Vec<String> = vec!["@ide-core"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let result = parse_features(&input, &reg);
+        assert_eq!(result, vec!["Lsp", "TreeView", "Tabs"]);
+    }
+
+    #[test]
+    fn test_parse_features_preset_minimal_is_empty() {
+        let reg = default_registry();
+        let input: Vec<String> = vec!["@minimal"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let result = parse_features(&input, &reg);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_features_mixed_preset_and_aliases() {
+        let reg = default_registry();
+        let input: Vec<String> = vec!["@ide-core", "python"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let result = parse_features(&input, &reg);
+        assert_eq!(result, vec!["Lsp", "TreeView", "Tabs", "Python"]);
     }
 }

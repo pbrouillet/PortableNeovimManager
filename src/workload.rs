@@ -3,6 +3,39 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Feature — an individual toggleable unit within a workload
+// ---------------------------------------------------------------------------
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Feature {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub plugins: Vec<String>,
+    #[serde(default)]
+    pub config_lua: Option<String>,
+    /// Whether this feature is on by default when its parent workload is enabled.
+    #[serde(default = "default_true")]
+    pub default_enabled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Preset — a named set of workloads for quick bulk-enable
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Preset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub workloads: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Workload
 // ---------------------------------------------------------------------------
 
@@ -13,11 +46,57 @@ pub struct Workload {
     pub description: String,
     pub base: bool,
     pub depends_on: Vec<String>,
+    /// Features within this workload (new format).
+    #[serde(default)]
+    pub features: Vec<Feature>,
+    /// DEPRECATED — kept for backward compat with old workloads.json.
+    /// Use `features` instead. Auto-migrated on load via `normalize()`.
+    #[serde(default, skip_serializing)]
     pub plugins: Vec<String>,
+    /// DEPRECATED — kept for backward compat with old workloads.json.
+    #[serde(default, skip_serializing)]
     pub config_lua: Option<String>,
     pub cli_aliases: Vec<String>,
     #[serde(default)]
     pub tutorial: Option<String>,
+}
+
+impl Workload {
+    /// Migrate old-format workloads (plugins/config_lua on Workload) to the
+    /// new feature-based format.  No-op if features are already populated.
+    pub fn normalize(&mut self) {
+        if self.features.is_empty() && !self.plugins.is_empty() {
+            self.features = vec![Feature {
+                id: self.id.to_lowercase(),
+                name: self.name.clone(),
+                description: self.description.clone(),
+                plugins: std::mem::take(&mut self.plugins),
+                config_lua: self.config_lua.take(),
+                default_enabled: true,
+            }];
+        }
+    }
+
+    /// Collect all plugin specs from all features.
+    pub fn all_plugins(&self) -> Vec<String> {
+        self.features
+            .iter()
+            .flat_map(|f| f.plugins.iter().cloned())
+            .collect()
+    }
+
+    /// Collect all config_lua blocks from all features.
+    pub fn all_config_lua(&self) -> Vec<String> {
+        self.features
+            .iter()
+            .filter_map(|f| f.config_lua.clone())
+            .collect()
+    }
+
+    /// Find a feature by its id within this workload.
+    pub fn find_feature(&self, feature_id: &str) -> Option<&Feature> {
+        self.features.iter().find(|f| f.id == feature_id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -39,10 +118,19 @@ pub struct Tutorial {
 pub struct WorkloadRegistry {
     pub workloads: Vec<Workload>,
     #[serde(default)]
+    pub presets: Vec<Preset>,
+    #[serde(default)]
     pub tutorials: Vec<Tutorial>,
 }
 
 impl WorkloadRegistry {
+    /// Normalize all workloads (migrate old format if needed).
+    pub fn normalize(&mut self) {
+        for w in &mut self.workloads {
+            w.normalize();
+        }
+    }
+
     pub fn all(&self) -> &[Workload] {
         &self.workloads
     }
@@ -118,6 +206,23 @@ impl WorkloadRegistry {
         }
         None
     }
+
+    /// Find a preset by its id.
+    pub fn find_preset(&self, id: &str) -> Option<&Preset> {
+        let lower = id.to_lowercase();
+        self.presets.iter().find(|p| p.id.to_lowercase() == lower)
+    }
+
+    /// Resolve a "WorkloadId/FeatureId" path to the workload and feature.
+    pub fn find_feature_by_path(&self, path: &str) -> Option<(&Workload, &Feature)> {
+        let parts: Vec<&str> = path.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let workload = self.find_by_id(parts[0])?;
+        let feature = workload.find_feature(parts[1])?;
+        Some((workload, feature))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +263,8 @@ pub fn load_workloads() -> WorkloadRegistry {
 
 fn load_workloads_from(path: &Path) -> Result<WorkloadRegistry, Box<dyn std::error::Error>> {
     let data = std::fs::read_to_string(path)?;
-    let registry: WorkloadRegistry = serde_json::from_str(&data)?;
+    let mut registry: WorkloadRegistry = serde_json::from_str(&data)?;
+    registry.normalize();
     Ok(registry)
 }
 
@@ -178,6 +284,7 @@ fn write_workloads_file(
 pub fn default_registry() -> WorkloadRegistry {
     WorkloadRegistry {
         workloads: default_workloads(),
+        presets: default_presets(),
         tutorials: default_tutorials(),
     }
 }
@@ -190,11 +297,21 @@ fn default_workloads() -> Vec<Workload> {
             description: "Language Server Protocol (mason + lspconfig)".into(),
             base: false,
             depends_on: vec![],
-            plugins: vec![
-                r#"{ "neovim/nvim-lspconfig" }"#.into(),
-                r#"{ "williamboman/mason.nvim", config = true }"#.into(),
-                r#"{ "williamboman/mason-lspconfig.nvim", config = true }"#.into(),
+            features: vec![
+                Feature {
+                    id: "lspconfig".into(),
+                    name: "LSP Core".into(),
+                    description: "Language server configs + Mason installer".into(),
+                    plugins: vec![
+                        r#"{ "neovim/nvim-lspconfig" }"#.into(),
+                        r#"{ "williamboman/mason.nvim", config = true }"#.into(),
+                        r#"{ "williamboman/mason-lspconfig.nvim", config = true }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
             ],
+            plugins: vec![],
             config_lua: None,
             cli_aliases: vec!["lsp".into()],
             tutorial: Some(r#"LSP (Language Server Protocol)
@@ -249,11 +366,21 @@ Troubleshooting
             description: "Debug Adapter Protocol (nvim-dap + mason)".into(),
             base: false,
             depends_on: vec![],
-            plugins: vec![
-                r#"{ "mfussenegger/nvim-dap" }"#.into(),
-                r#"{ "rcarriga/nvim-dap-ui", dependencies = { "mfussenegger/nvim-dap", "nvim-neotest/nvim-nio" }, config = true }"#.into(),
-                r#"{ "jay-babu/mason-nvim-dap.nvim", config = true }"#.into(),
+            features: vec![
+                Feature {
+                    id: "dap-core".into(),
+                    name: "DAP Core".into(),
+                    description: "Debug adapter client + UI + Mason integration".into(),
+                    plugins: vec![
+                        r#"{ "mfussenegger/nvim-dap" }"#.into(),
+                        r#"{ "rcarriga/nvim-dap-ui", dependencies = { "mfussenegger/nvim-dap", "nvim-neotest/nvim-nio" }, config = true }"#.into(),
+                        r#"{ "jay-babu/mason-nvim-dap.nvim", config = true }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
             ],
+            plugins: vec![],
             config_lua: None,
             cli_aliases: vec!["dap".into()],
             tutorial: Some(r#"DAP (Debug Adapter Protocol)
@@ -325,10 +452,15 @@ Workflow
             description: "Left explorer panel (neo-tree)".into(),
             base: false,
             depends_on: vec![],
-            plugins: vec![
-                r#"{ "nvim-neo-tree/neo-tree.nvim", branch = "v3.x", dependencies = { "nvim-lua/plenary.nvim", "nvim-tree/nvim-web-devicons", "MunifTanjim/nui.nvim" } }"#.into(),
-            ],
-            config_lua: Some(r#"-- Feature: TreeView (neo-tree)
+            features: vec![
+                Feature {
+                    id: "neo-tree".into(),
+                    name: "Neo-tree".into(),
+                    description: "VS Code-style file explorer sidebar".into(),
+                    plugins: vec![
+                        r#"{ "nvim-neo-tree/neo-tree.nvim", branch = "v3.x", dependencies = { "nvim-lua/plenary.nvim", "nvim-tree/nvim-web-devicons", "MunifTanjim/nui.nvim" } }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: TreeView (neo-tree)
 -- Detect Nerd Font availability
 vim.g.have_nerd_font = (function()
   -- Check if a known Nerd Font glyph renders at double width
@@ -389,6 +521,11 @@ require("neo-tree").setup({
 vim.keymap.set("n", "<leader>e", "<cmd>Neotree toggle<cr>", { desc = "Toggle explorer" })
 vim.keymap.set("n", "<leader>be", "<cmd>Neotree buffers toggle<cr>", { desc = "Toggle buffer explorer" })
 vim.keymap.set("n", "<leader>ge", "<cmd>Neotree git_status toggle<cr>", { desc = "Toggle git explorer" })"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
             cli_aliases: vec!["treeview".into(), "tree-view".into(), "tree".into()],
             tutorial: Some(r#"TreeView (Neo-tree File Explorer)
 =================================
@@ -437,10 +574,15 @@ Tips
             description: "Top tabbed editor bar (bufferline)".into(),
             base: false,
             depends_on: vec![],
-            plugins: vec![
-                r#"{ "akinsho/bufferline.nvim", version = "*", dependencies = { "nvim-tree/nvim-web-devicons" } }"#.into(),
-            ],
-            config_lua: Some(r#"-- Feature: Tabs (bufferline)
+            features: vec![
+                Feature {
+                    id: "bufferline".into(),
+                    name: "Bufferline".into(),
+                    description: "IDE-style tab bar for open buffers".into(),
+                    plugins: vec![
+                        r#"{ "akinsho/bufferline.nvim", version = "*", dependencies = { "nvim-tree/nvim-web-devicons" } }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Tabs (bufferline)
 require("bufferline").setup({
   options = {
     mode = "buffers",
@@ -463,6 +605,11 @@ vim.keymap.set("n", "<leader>bn", "<cmd>BufferLineCycleNext<cr>", { desc = "Next
 vim.keymap.set("n", "<leader>bp", "<cmd>BufferLineCyclePrev<cr>", { desc = "Previous buffer" })
 vim.keymap.set("n", "<leader>bd", "<cmd>bdelete<cr>", { desc = "Delete buffer" })
 vim.keymap.set("n", "<leader>bo", "<cmd>BufferLineCloseOthers<cr>", { desc = "Close other buffers" })"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
             cli_aliases: vec!["tabs".into(), "tabline".into(), "bufferline".into()],
             tutorial: Some(r#"Tabs (Bufferline)
 =================
@@ -501,15 +648,25 @@ with the explorer panel, showing "Explorer" above the tree."#.into()),
             description: "Fuzzy finder (always on)".into(),
             base: true,
             depends_on: vec![],
-            plugins: vec![
-                r#"{ "nvim-telescope/telescope.nvim", tag = "0.1.8", dependencies = { "nvim-lua/plenary.nvim" } }"#.into(),
-            ],
-            config_lua: Some(r#"-- Feature: Telescope
+            features: vec![
+                Feature {
+                    id: "telescope".into(),
+                    name: "Telescope".into(),
+                    description: "Fuzzy finder for files, grep, buffers, and more".into(),
+                    plugins: vec![
+                        r#"{ "nvim-telescope/telescope.nvim", tag = "0.1.8", dependencies = { "nvim-lua/plenary.nvim" } }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Telescope
 require("telescope").setup()
 vim.keymap.set("n", "<leader>ff", "<cmd>Telescope find_files<cr>", { desc = "Find files" })
 vim.keymap.set("n", "<leader>fg", "<cmd>Telescope live_grep<cr>", { desc = "Live grep" })
 vim.keymap.set("n", "<leader>fb", "<cmd>Telescope buffers<cr>", { desc = "Find buffers" })
 vim.keymap.set("n", "<leader>fh", "<cmd>Telescope help_tags<cr>", { desc = "Help tags" })"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
             cli_aliases: vec!["telescope".into()],
             tutorial: Some(r#"Telescope (Fuzzy Finder)
 ========================
@@ -545,9 +702,19 @@ Tips
             description: "Syntax highlighting (always on)".into(),
             base: true,
             depends_on: vec![],
-            plugins: vec![
-                r#"{ "nvim-treesitter/nvim-treesitter", build = ":TSUpdate", config = function() require("nvim-treesitter.install").prefer_git = false end }"#.into(),
+            features: vec![
+                Feature {
+                    id: "treesitter".into(),
+                    name: "Treesitter".into(),
+                    description: "Tree-based syntax highlighting and code parsing".into(),
+                    plugins: vec![
+                        r#"{ "nvim-treesitter/nvim-treesitter", build = ":TSUpdate", config = function() require("nvim-treesitter.install").prefer_git = false end }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
             ],
+            plugins: vec![],
             config_lua: None,
             cli_aliases: vec!["treesitter".into()],
             tutorial: Some(r#"Treesitter (Syntax Highlighting)
@@ -588,9 +755,19 @@ already."#.into()),
             description: "C# language server (OmniSharp)".into(),
             base: false,
             depends_on: vec!["Lsp".into()],
-            plugins: vec![
-                r#"{ "Hoffs/omnisharp-extended-lsp.nvim" }"#.into(),
+            features: vec![
+                Feature {
+                    id: "omnisharp".into(),
+                    name: "OmniSharp".into(),
+                    description: "Extended LSP support for C# via OmniSharp".into(),
+                    plugins: vec![
+                        r#"{ "Hoffs/omnisharp-extended-lsp.nvim" }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
             ],
+            plugins: vec![],
             config_lua: None,
             cli_aliases: vec!["omnisharp".into(), "csharp".into(), "cs".into()],
             tutorial: Some(r#"OmniSharp (C# / .NET Development)
@@ -665,9 +842,19 @@ Key LSP commands for C#
             description: "TypeScript/JavaScript language server (ts_ls)".into(),
             base: false,
             depends_on: vec!["Lsp".into()],
-            plugins: vec![
-                r#"{ "pmizio/typescript-tools.nvim", dependencies = { "nvim-lua/plenary.nvim", "neovim/nvim-lspconfig" }, config = true }"#.into(),
+            features: vec![
+                Feature {
+                    id: "typescript-tools".into(),
+                    name: "TypeScript Tools".into(),
+                    description: "Fast TypeScript/JavaScript language support".into(),
+                    plugins: vec![
+                        r#"{ "pmizio/typescript-tools.nvim", dependencies = { "nvim-lua/plenary.nvim", "neovim/nvim-lspconfig" }, config = true }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
             ],
+            plugins: vec![],
             config_lua: None,
             cli_aliases: vec!["node".into(), "typescript".into(), "ts".into(), "javascript".into(), "js".into()],
             tutorial: Some(r#"Node (TypeScript / JavaScript Development)
@@ -756,9 +943,19 @@ Key LSP commands
             description: "Python language server (pyright)".into(),
             base: false,
             depends_on: vec!["Lsp".into()],
-            plugins: vec![
-                r#"{ "neovim/nvim-lspconfig" }"#.into(),
+            features: vec![
+                Feature {
+                    id: "pyright".into(),
+                    name: "Pyright".into(),
+                    description: "Python language server with type checking".into(),
+                    plugins: vec![
+                        r#"{ "neovim/nvim-lspconfig" }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
             ],
+            plugins: vec![],
             config_lua: None,
             cli_aliases: vec!["python".into(), "py".into()],
             tutorial: Some(r#"Python Development
@@ -848,6 +1045,29 @@ Key LSP commands
   gr          Find references
   K           Hover type information
   :LspInfo    Verify pyright is attached"#.into()),
+        },
+    ]
+}
+
+fn default_presets() -> Vec<Preset> {
+    vec![
+        Preset {
+            id: "minimal".into(),
+            name: "Minimal".into(),
+            description: "Just syntax highlighting and fuzzy finding (base workloads only)".into(),
+            workloads: vec![],
+        },
+        Preset {
+            id: "ide-core".into(),
+            name: "IDE Core".into(),
+            description: "LSP, tree view, tabs — essential IDE features".into(),
+            workloads: vec!["Lsp".into(), "TreeView".into(), "Tabs".into()],
+        },
+        Preset {
+            id: "ide-full".into(),
+            name: "IDE Full".into(),
+            description: "Full IDE: LSP, DAP, tree view, tabs".into(),
+            workloads: vec!["Lsp".into(), "Dap".into(), "TreeView".into(), "Tabs".into()],
         },
     ]
 }
@@ -1057,7 +1277,7 @@ mod tests {
         assert_eq!(loaded.workloads.len(), reg.workloads.len());
         for (a, b) in reg.workloads.iter().zip(loaded.workloads.iter()) {
             assert_eq!(a.id, b.id);
-            assert_eq!(a.plugins.len(), b.plugins.len());
+            assert_eq!(a.features.len(), b.features.len());
         }
         assert_eq!(loaded.tutorials.len(), reg.tutorials.len());
     }
@@ -1141,5 +1361,69 @@ mod tests {
     fn test_tutorial_content_unknown_returns_none() {
         let reg = default_registry();
         assert!(reg.tutorial_content("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_all_workloads_have_features() {
+        let reg = default_registry();
+        for w in reg.all() {
+            assert!(
+                !w.features.is_empty(),
+                "Workload '{}' has no features",
+                w.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_workload_all_plugins_via_features() {
+        let reg = default_registry();
+        let lsp = reg.find_by_id("Lsp").unwrap();
+        let plugins = lsp.all_plugins();
+        assert!(!plugins.is_empty());
+        assert!(plugins.iter().any(|p| p.contains("nvim-lspconfig")));
+    }
+
+    #[test]
+    fn test_find_feature_by_path() {
+        let reg = default_registry();
+        let (w, f) = reg.find_feature_by_path("Lsp/lspconfig").unwrap();
+        assert_eq!(w.id, "Lsp");
+        assert_eq!(f.id, "lspconfig");
+        assert!(reg.find_feature_by_path("Nonexistent/foo").is_none());
+    }
+
+    #[test]
+    fn test_normalize_migrates_old_format() {
+        let json = r#"{
+            "workloads": [{
+                "id": "Old",
+                "name": "Old",
+                "description": "test",
+                "base": false,
+                "depends_on": [],
+                "plugins": ["{ \"some/plugin\" }"],
+                "config_lua": "vim.g.test = true",
+                "cli_aliases": ["old"]
+            }]
+        }"#;
+        let mut reg: WorkloadRegistry = serde_json::from_str(json).unwrap();
+        reg.normalize();
+        let w = &reg.workloads[0];
+        assert_eq!(w.features.len(), 1);
+        assert_eq!(w.features[0].id, "old");
+        assert_eq!(w.features[0].plugins.len(), 1);
+        assert!(w.features[0].config_lua.is_some());
+        // Old fields should be emptied after migration
+        assert!(w.plugins.is_empty());
+        assert!(w.config_lua.is_none());
+    }
+
+    #[test]
+    fn test_presets_exist() {
+        let reg = default_registry();
+        assert!(reg.find_preset("minimal").is_some());
+        assert!(reg.find_preset("ide-core").is_some());
+        assert!(reg.find_preset("ide-full").is_some());
     }
 }

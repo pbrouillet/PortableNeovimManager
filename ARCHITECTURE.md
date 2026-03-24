@@ -53,7 +53,7 @@ Owns two data structures and the directory layout:
 
 **`GlobalSettings`** — App-wide configuration loaded from `settings.json` next to the executable. Currently holds `instances_dir` (where instances live). Every field uses `#[serde(default)]` for forward-compatibility — new fields can be added without breaking existing files.
 
-**`InstanceManifest`** — Per-instance metadata stored as `manifest.json` inside the instance directory. Tracks name, Neovim version, enabled features, leader key, and timestamps.
+**`InstanceManifest`** — Per-instance metadata stored as `manifest.json` inside the instance directory. Tracks name, Neovim version, enabled workloads, disabled/extra features, leader key, and timestamps. Old manifests with `features` field are auto-migrated to `workloads` via serde alias.
 
 **Directory helpers** — `instances_dir()`, `instance_dir()`, and `ensure_instance_dirs()` all accept `&GlobalSettings` so the storage location is configurable.
 
@@ -134,22 +134,38 @@ Handles two archive formats:
 
 ### `workload.rs` — Feature/Plugin Registry
 
-A workload defines a composable feature:
+The registry uses a two-level hierarchy — **Workloads** contain **Features**:
 
 ```rust
+struct Feature {
+    id: String,              // "lspconfig", "neo-tree", etc.
+    name: String,            // Display name
+    plugins: Vec<String>,    // Lazy.nvim plugin spec strings
+    config_lua: Option<String>, // Lua config block
+    default_enabled: bool,   // On by default when workload enabled?
+}
+
 struct Workload {
     id: String,              // "Lsp", "TreeView", etc.
     name: String,            // Display name
     description: String,     // User-facing text
     base: bool,              // Always included?
     depends_on: Vec<String>, // Required workload IDs
-    plugins: Vec<String>,    // Lazy.nvim plugin spec strings
-    config_lua: Option<String>, // Lua config block
+    features: Vec<Feature>,  // Individual toggleable units
     cli_aliases: Vec<String>,   // CLI aliases (case-insensitive)
+}
+
+struct Preset {
+    id: String,              // "ide-core", "ide-full", etc.
+    workloads: Vec<String>,  // Workload IDs to enable as a batch
 }
 ```
 
-**Loading:** On first run, `workloads.json` is generated next to the executable from built-in defaults. On subsequent runs it's loaded from disk. If parsing fails, built-in defaults are used. Users can edit `workloads.json` to customize plugins or add new workloads.
+Toggling a workload enables/disables all its features in bulk. Individual features can also be toggled within an expanded workload in the TUI.
+
+**Presets** provide quick bulk-enable: `@minimal` (base only), `@ide-core` (LSP + tree view + tabs), `@ide-full` (everything).
+
+**Loading:** On first run, `workloads.json` is generated next to the executable from built-in defaults. On subsequent runs it's loaded from disk. If parsing fails, built-in defaults are used. Old-format workloads (plugins/config_lua on workload instead of features) are auto-migrated via `normalize()`.
 
 **Dependency tracking:** The registry tracks which workloads depend on which. The TUI uses `dependents_of()` to auto-disable features when their dependency is turned off, and the reverse when enabling.
 
@@ -159,7 +175,7 @@ Generates a complete `init.lua` for an instance:
 
 1. **Lazy.nvim bootstrap** — clones lazy.nvim into the instance's data directory on first launch
 2. **Leader key** — sets `mapleader` and `maplocalleader`
-3. **Plugin specs** — collects specs from all active workloads (base + enabled optional) into a `lazy.setup({...})` call
+3. **Plugin specs** — collects specs from all active workloads (base + enabled optional), iterating features within each workload and respecting disabled/extra feature overrides
 4. **Feature configs** — appends each workload's `config_lua` block (keymaps, plugin setup calls)
 5. **Base settings** — line numbers, termguicolors, clipboard, undo, search
 6. **User hook** — loads `user.lua` from the config directory if it exists
@@ -194,7 +210,9 @@ EditFeatures            EditFeatures
 InstanceList            InstanceDetail
 ```
 
-The `App` struct holds all state: instance list, selection cursor, current screen, feature checkbox state, workload registry, and global settings.
+The `App` struct holds all state: instance list, selection cursor, current screen, hierarchical workload/feature checkbox state, workload registry, and global settings.
+
+The EditFeatures screen shows workloads as expandable groups. Pressing space toggles a workload (all features), right/l expands to show individual features, and left/h collapses.
 
 Operations that need the terminal (launch, update, delete, font install) temporarily leave the alternate screen, run in the normal terminal, then re-enter the TUI.
 
