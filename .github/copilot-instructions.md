@@ -11,6 +11,20 @@ cargo clippy                 # lint
 cargo fmt --check            # check formatting
 ```
 
+### Build Gotchas
+
+- **Locked binary:** On Windows, `cargo build` will fail with "Access is denied (os error 5)" if `pnm.exe` is running (e.g. TUI open, or the exe was launched directly). Stop the process first, or build to an alternate target dir.
+- **Workload defaults are compiled in.** Changes to `src/workload/defaults.rs` may not trigger a recompile if the file timestamp didn't change (e.g. only data strings changed). When in doubt, run `cargo clean -p portable-neovim-manager && cargo build`.
+
+## Versioning
+
+The version in `Cargo.toml` and git tags must stay in sync. When bumping a version:
+1. Update `version` in `Cargo.toml`
+2. Create the git tag (e.g. `git tag v1.2.0`)
+3. Push both: `git push && git push origin <tag>`
+
+Tags follow semver with a `v` prefix (e.g. `v1.2.0`). The GitHub Actions release workflow triggers on tagged pushes.
+
 ## Architecture
 
 Rust CLI/TUI tool managing portable, self-contained Neovim installations. Each instance lives in `~/.portable-nvim/instances/<name>/` with isolated `bin/`, `config/`, `data/`, `cache/`, `state/` directories. Isolation is achieved by setting XDG env vars per launch.
@@ -60,3 +74,7 @@ The `plugins/` module generates `init.lua` as Lua code. Plugin specs and config 
 - **Archive format**: `.zip` for Windows, `.tar.gz` for Linux/macOS.
 - **Font paths** (`font.rs`): Windows uses `%LOCALAPPDATA%\Microsoft\Windows\Fonts\`, macOS uses `~/Library/Fonts/`, Linux uses `~/.local/share/fonts/` + `fc-cache`.
 - **Icon rendering**: Windows Terminal may not render Nerd Font glyphs without explicit font configuration. Generated Lua must always provide ASCII fallbacks.
+
+## Workflow
+
+After completing feature work, proactively commit, push, and bump the version tag (updating both `Cargo.toml` and the git tag) unless the user indicates otherwise.
