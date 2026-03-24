@@ -173,7 +173,89 @@ Workflow
 3. Start debugging with :DapContinue
 4. The DAP UI opens automatically showing variables, call stack, etc.
 5. Step through code, inspect values, evaluate expressions in the REPL"#.into()),
-            category: None,
+            category: Some("Tasks & Launchers".into()),
+        },
+        Workload {
+            id: "Overseer".into(),
+            name: "Overseer".into(),
+            description: "Task runner & VS Code tasks.json support (overseer.nvim)".into(),
+            base: false,
+            depends_on: vec![],
+            features: vec![
+                Feature {
+                    id: "overseer".into(),
+                    name: "Overseer".into(),
+                    description: "Task runner with .vscode/tasks.json support and DAP integration".into(),
+                    plugins: vec![
+                        r#"{ "stevearc/overseer.nvim" }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Overseer (task runner)
+require("overseer").setup()
+vim.keymap.set("n", "<leader>or", "<cmd>OverseerRun<cr>", { desc = "Run task" })
+vim.keymap.set("n", "<leader>ot", "<cmd>OverseerToggle<cr>", { desc = "Toggle task list" })
+vim.keymap.set("n", "<leader>oa", "<cmd>OverseerTaskAction<cr>", { desc = "Task action" })
+vim.keymap.set("n", "<leader>oi", "<cmd>OverseerInfo<cr>", { desc = "Overseer info" })"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
+            cli_aliases: vec!["overseer".into(), "tasks".into()],
+            tutorial: Some(r#"Overseer (Task Runner)
+======================
+
+Overseer is a task runner and job management plugin that can read
+VS Code's .vscode/tasks.json files natively.
+
+Key commands
+------------
+  <leader>or    Run a task (shows picker with all available tasks)
+  <leader>ot    Toggle the task list panel
+  <leader>oa    Run an action on a task
+  <leader>oi    Show overseer info (registered templates, components)
+
+  :OverseerRun          Pick and run a task
+  :OverseerToggle       Open/close task list
+
+VS Code tasks.json
+------------------
+If your project has a .vscode/tasks.json file, Overseer picks it up
+automatically.  Supported features include:
+
+  - shell and process task types
+  - Variable substitution (${workspaceFolder}, ${file}, etc.)
+  - Input variables (promptString, pickString)
+  - Problem matchers ($tsc, $eslint-stylish, and custom)
+  - Compound tasks (dependsOn, dependsOrder)
+  - Background/watch tasks
+  - OS-specific properties (windows, linux, osx)
+
+DAP integration
+---------------
+When both Overseer and DAP workloads are enabled, Overseer
+automatically handles preLaunchTask and postDebugTask from
+your .vscode/launch.json — no extra configuration needed.
+
+Built-in task sources
+---------------------
+Overseer auto-detects tasks from many sources:
+  - .vscode/tasks.json
+  - Makefile
+  - package.json (npm scripts)
+  - Cargo.toml (cargo commands)
+  - And more via template providers
+
+Custom tasks
+------------
+Define project-local tasks in .overseer/ or global templates in
+~/.config/nvim/lua/overseer/template/.
+
+Tips
+----
+- Overseer integrates with neotest (Testing workload) to run tests
+- Task output is parsed into Neovim diagnostics via problem matchers
+- Use :OverseerRun to see all available tasks from every source"#.into()),
+            category: Some("Tasks & Launchers".into()),
         },
         Workload {
             id: "TreeView".into(),
@@ -1382,10 +1464,10 @@ fn default_presets() -> Vec<Preset> {
             name: "IDE Full".into(),
             description: "Full IDE: all features including formatting, testing, and AI".into(),
             workloads: vec![
-                "Lsp".into(), "Dap".into(), "Completion".into(), "Git".into(),
-                "Formatting".into(), "Testing".into(), "TreeView".into(),
-                "Tabs".into(), "Editing".into(), "Statusline".into(),
-                "AI".into(),
+                "Lsp".into(), "Dap".into(), "Overseer".into(), "Completion".into(),
+                "Git".into(), "Formatting".into(), "Testing".into(),
+                "TreeView".into(), "Tabs".into(), "Editing".into(),
+                "Statusline".into(), "AI".into(),
             ],
         },
     ]
