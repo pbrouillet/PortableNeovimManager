@@ -47,13 +47,22 @@ pub struct App {
     pub tutorial_cursor: usize,
     /// Cached tutorial topics list: (id, title)
     pub tutorial_topics: Vec<(String, String)>,
+    /// Filtered tutorial topics for display (indices into tutorial_topics)
+    pub tutorial_filtered: Vec<usize>,
     /// Scroll offset for tutorial view
     pub tutorial_scroll: usize,
+    /// Screen to return to when leaving tutorial screens
+    pub tutorial_return_screen: Option<Box<Screen>>,
+    /// Search query for tutorial list filtering
+    pub tutorial_search: String,
+    /// Whether the search input is active
+    pub tutorial_search_active: bool,
 }
 
 impl App {
     fn new(instances: Vec<InstanceManifest>, registry: WorkloadRegistry, settings: GlobalSettings) -> Self {
         let tutorial_topics = registry.all_tutorial_topics();
+        let tutorial_filtered = (0..tutorial_topics.len()).collect();
         Self {
             instances,
             selected: 0,
@@ -67,7 +76,11 @@ impl App {
             settings,
             tutorial_cursor: 0,
             tutorial_topics,
+            tutorial_filtered,
             tutorial_scroll: 0,
+            tutorial_return_screen: None,
+            tutorial_search: String::new(),
+            tutorial_search_active: false,
         }
     }
 
@@ -83,6 +96,52 @@ impl App {
 
     fn selected_name(&self) -> Option<String> {
         self.instances.get(self.selected).map(|i| i.name.clone())
+    }
+
+    fn open_tutorial_list(&mut self, return_to: Screen) {
+        self.tutorial_return_screen = Some(Box::new(return_to));
+        self.tutorial_cursor = 0;
+        self.tutorial_search.clear();
+        self.tutorial_search_active = false;
+        self.update_tutorial_filter();
+        self.screen = Screen::TutorialList;
+        self.message = None;
+    }
+
+    fn open_tutorial_view(&mut self, title: String, content: String, return_to: Screen) {
+        self.tutorial_return_screen = Some(Box::new(return_to));
+        self.tutorial_scroll = 0;
+        self.screen = Screen::TutorialView { title, content };
+    }
+
+    fn tutorial_return(&mut self) {
+        if let Some(screen) = self.tutorial_return_screen.take() {
+            self.screen = *screen;
+        } else {
+            self.screen = Screen::InstanceList;
+        }
+        self.message = None;
+    }
+
+    fn update_tutorial_filter(&mut self) {
+        let query = self.tutorial_search.to_lowercase();
+        if query.is_empty() {
+            self.tutorial_filtered = (0..self.tutorial_topics.len()).collect();
+        } else {
+            self.tutorial_filtered = self
+                .tutorial_topics
+                .iter()
+                .enumerate()
+                .filter(|(_, (id, title))| {
+                    id.to_lowercase().contains(&query)
+                        || title.to_lowercase().contains(&query)
+                })
+                .map(|(i, _)| i)
+                .collect();
+        }
+        if self.tutorial_cursor >= self.tutorial_filtered.len() {
+            self.tutorial_cursor = 0;
+        }
     }
 
     fn enter_edit_features(&mut self, name: &str) {
@@ -394,9 +453,7 @@ async fn handle_list_keys(
             do_init_settings(app);
         }
         KeyCode::Char('t') => {
-            app.tutorial_cursor = 0;
-            app.screen = Screen::TutorialList;
-            app.message = None;
+            app.open_tutorial_list(Screen::InstanceList);
         }
         _ => {}
     }
@@ -434,6 +491,9 @@ async fn handle_detail_keys(
         }
         KeyCode::Char('o') => {
             open_instance_dir(name, app);
+        }
+        KeyCode::Char('t') => {
+            app.open_tutorial_list(Screen::InstanceDetail { name: name.to_string() });
         }
         _ => {}
     }
@@ -473,11 +533,8 @@ fn handle_features_keys(app: &mut App, code: KeyCode, name: &str) {
         KeyCode::Char('t') => {
             if let Some((workload_id, _)) = app.feature_checkboxes.get(app.feature_cursor) {
                 if let Some((title, content)) = app.registry.tutorial_content(workload_id) {
-                    app.tutorial_scroll = 0;
-                    app.screen = Screen::TutorialView {
-                        title,
-                        content,
-                    };
+                    let return_to = Screen::EditFeatures { name: name.to_string() };
+                    app.open_tutorial_view(title, content, return_to);
                 } else {
                     app.message = Some("No tutorial available for this feature.".to_string());
                 }
@@ -516,35 +573,61 @@ fn handle_leader_keys(app: &mut App, code: KeyCode, name: &str) {
 }
 
 fn handle_tutorial_list_keys(app: &mut App, code: KeyCode) {
+    if app.tutorial_search_active {
+        match code {
+            KeyCode::Esc => {
+                app.tutorial_search_active = false;
+                app.tutorial_search.clear();
+                app.update_tutorial_filter();
+            }
+            KeyCode::Enter => {
+                app.tutorial_search_active = false;
+            }
+            KeyCode::Backspace => {
+                app.tutorial_search.pop();
+                app.update_tutorial_filter();
+            }
+            KeyCode::Char(c) => {
+                app.tutorial_search.push(c);
+                app.update_tutorial_filter();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
-            app.screen = Screen::InstanceList;
-            app.message = None;
+            app.tutorial_return();
         }
         KeyCode::Char('j') | KeyCode::Down => {
-            if !app.tutorial_topics.is_empty() {
-                app.tutorial_cursor = (app.tutorial_cursor + 1) % app.tutorial_topics.len();
+            if !app.tutorial_filtered.is_empty() {
+                app.tutorial_cursor = (app.tutorial_cursor + 1) % app.tutorial_filtered.len();
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            if !app.tutorial_topics.is_empty() {
+            if !app.tutorial_filtered.is_empty() {
                 app.tutorial_cursor = if app.tutorial_cursor == 0 {
-                    app.tutorial_topics.len() - 1
+                    app.tutorial_filtered.len() - 1
                 } else {
                     app.tutorial_cursor - 1
                 };
             }
         }
         KeyCode::Enter => {
-            if let Some((id, _)) = app.tutorial_topics.get(app.tutorial_cursor) {
-                if let Some((title, content)) = app.registry.tutorial_content(id) {
-                    app.tutorial_scroll = 0;
-                    app.screen = Screen::TutorialView {
-                        title,
-                        content,
-                    };
+            if let Some(&topic_idx) = app.tutorial_filtered.get(app.tutorial_cursor) {
+                if let Some((id, _)) = app.tutorial_topics.get(topic_idx) {
+                    if let Some((title, content)) = app.registry.tutorial_content(id) {
+                        app.tutorial_scroll = 0;
+                        // Return to TutorialList (not the original caller) from the view
+                        app.tutorial_return_screen = Some(Box::new(Screen::TutorialList));
+                        app.screen = Screen::TutorialView { title, content };
+                    }
                 }
             }
+        }
+        KeyCode::Char('/') => {
+            app.tutorial_search_active = true;
         }
         _ => {}
     }
@@ -553,8 +636,7 @@ fn handle_tutorial_list_keys(app: &mut App, code: KeyCode) {
 fn handle_tutorial_view_keys(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
-            app.screen = Screen::TutorialList;
-            app.message = None;
+            app.tutorial_return();
         }
         KeyCode::Char('j') | KeyCode::Down => {
             app.tutorial_scroll = app.tutorial_scroll.saturating_add(1);

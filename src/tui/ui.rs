@@ -209,11 +209,11 @@ fn draw_instance_detail(frame: &mut Frame, app: &App, name: &str) {
     // Footer
     let footer_text = if app.message.is_some() {
         format!(
-            " {} | Esc: Back | f: Features | m: Leader Key | o: Open Dir | l: Launch | u: Update | d: Delete ",
+            " {} | Esc: Back | f: Features | m: Leader Key | t: Tutorials | o: Open Dir | l: Launch | u: Update | d: Delete ",
             app.message.as_deref().unwrap_or("")
         )
     } else {
-        " Esc: Back | f: Features | m: Leader Key | o: Open Dir | l: Launch | u: Update | d: Delete ".to_string()
+        " Esc: Back | f: Features | m: Leader Key | t: Tutorials | o: Open Dir | l: Launch | u: Update | d: Delete ".to_string()
     };
     let footer = Paragraph::new(Line::from(vec![Span::styled(
         footer_text,
@@ -421,8 +421,10 @@ fn draw_edit_leader(frame: &mut Frame, app: &App, name: &str) {
 fn draw_tutorial_list(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
+    let has_search = app.tutorial_search_active || !app.tutorial_search.is_empty();
     let chunks = Layout::vertical(vec![
         Constraint::Length(3),
+        if has_search { Constraint::Length(3) } else { Constraint::Length(0) },
         Constraint::Min(5),
         Constraint::Length(3),
     ])
@@ -439,49 +441,102 @@ fn draw_tutorial_list(frame: &mut Frame, app: &App) {
     .block(Block::new().borders(Borders::ALL));
     frame.render_widget(header, chunks[0]);
 
-    // Topic list
-    let rows: Vec<Row> = app
-        .tutorial_topics
-        .iter()
-        .enumerate()
-        .map(|(i, (id, title))| {
-            let style = if i == app.tutorial_cursor {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Row::new(vec![
-                Cell::from(id.as_str()),
-                Cell::from(title.as_str()),
-            ])
-            .style(style)
-        })
-        .collect();
-
-    let widths = [Constraint::Length(20), Constraint::Min(30)];
-    let table = Table::new(rows, widths)
-        .header(
-            Row::new(vec!["TOPIC", "DESCRIPTION"])
-                .style(
+    // Search bar
+    if has_search {
+        let search_text = if app.tutorial_search_active {
+            format!("/ {}_", app.tutorial_search)
+        } else {
+            format!("/ {}", app.tutorial_search)
+        };
+        let search_bar = Paragraph::new(Line::from(vec![Span::styled(
+            search_text,
+            Style::default().fg(Color::Yellow),
+        )]))
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_style(if app.tutorial_search_active {
+                    Style::default().fg(Color::Yellow)
+                } else {
                     Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .bottom_margin(1),
-        )
+                }),
+        );
+        frame.render_widget(search_bar, chunks[1]);
+    }
+
+    // Topic list using filtered indices
+    let list_area = chunks[2];
+    if app.tutorial_filtered.is_empty() {
+        let msg = if app.tutorial_search.is_empty() {
+            "No tutorials available."
+        } else {
+            "No tutorials match your search."
+        };
+        let empty = Paragraph::new(Line::from(Span::styled(
+            msg,
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(ratatui::layout::Alignment::Center)
         .block(Block::new().borders(Borders::ALL));
-    frame.render_widget(table, chunks[1]);
+        frame.render_widget(empty, list_area);
+    } else {
+        let visible_height = list_area.height.saturating_sub(4) as usize; // borders + header row + margin
+        let offset = if app.tutorial_cursor >= visible_height {
+            app.tutorial_cursor - visible_height + 1
+        } else {
+            0
+        };
+
+        let rows: Vec<Row> = app
+            .tutorial_filtered
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .map(|(display_i, &topic_idx)| {
+                let (id, title) = &app.tutorial_topics[topic_idx];
+                let style = if display_i == app.tutorial_cursor {
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                Row::new(vec![
+                    Cell::from(id.as_str()),
+                    Cell::from(title.as_str()),
+                ])
+                .style(style)
+            })
+            .collect();
+
+        let widths = [Constraint::Length(20), Constraint::Min(30)];
+        let table = Table::new(rows, widths)
+            .header(
+                Row::new(vec!["TOPIC", "DESCRIPTION"])
+                    .style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .bottom_margin(1),
+            )
+            .block(Block::new().borders(Borders::ALL));
+        frame.render_widget(table, list_area);
+    }
 
     // Footer
+    let footer_text = if app.tutorial_search_active {
+        " Type to filter | Enter: Accept | Esc: Clear "
+    } else {
+        " j/k: Navigate | Enter: View | /: Search | Esc: Back "
+    };
     let footer = Paragraph::new(Line::from(vec![Span::styled(
-        " j/k: Navigate | Enter: View | Esc: Back ",
+        footer_text,
         Style::default().fg(Color::DarkGray),
     )]))
     .alignment(ratatui::layout::Alignment::Center)
     .block(Block::new().borders(Borders::ALL));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(footer, chunks[3]);
 }
 
 // ── Tutorial View ───────────────────────────────────────────────────────────
@@ -507,17 +562,84 @@ fn draw_tutorial_view(frame: &mut Frame, app: &App, title: &str, content: &str) 
     .block(Block::new().borders(Borders::ALL));
     frame.render_widget(header, chunks[0]);
 
-    // Content with scroll
-    let lines: Vec<Line> = content
-        .lines()
-        .map(|line| {
-            if line.chars().all(|c| c == '=' || c == '-') && !line.is_empty() {
-                Line::from(Span::styled(line, Style::default().fg(Color::DarkGray)))
-            } else if line.starts_with("  ") && line.contains("  ") {
-                Line::from(Span::styled(line, Style::default().fg(Color::Green)))
-            } else {
-                Line::from(line)
+    // Content with rich styling
+    let raw_lines: Vec<&str> = content.lines().collect();
+    let lines: Vec<Line> = raw_lines
+        .iter()
+        .enumerate()
+        .map(|(i, &line)| {
+            // Separator lines (=== or ---)
+            if !line.is_empty() && line.chars().all(|c| c == '=' || c == '-') {
+                return Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
+
+            // Heading: line immediately before a separator
+            let is_heading = if i + 1 < raw_lines.len() {
+                let next = raw_lines[i + 1];
+                !next.is_empty() && next.chars().all(|c| c == '=' || c == '-')
+            } else {
+                false
+            };
+            if is_heading {
+                return Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+
+            // Command/code lines (indented commands with : or $ prefix, or containing pnm/nvim commands)
+            let trimmed = line.trim_start();
+            if trimmed.starts_with(':')
+                || trimmed.starts_with('$')
+                || trimmed.starts_with("pnm ")
+                || trimmed.starts_with("nvim ")
+                || trimmed.starts_with("pip ")
+                || trimmed.starts_with("npm ")
+                || trimmed.starts_with("dotnet ")
+            {
+                return Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+
+            // Keybinding lines: indented text with a key combo pattern (e.g., "  <leader>r  Run")
+            if line.starts_with("  ") && trimmed.starts_with('<') {
+                if let Some(pos) = trimmed.find('>') {
+                    let key = &trimmed[..pos + 1];
+                    let rest = &trimmed[pos + 1..];
+                    return Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            key.to_string(),
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(rest.to_string()),
+                    ]);
+                }
+            }
+
+            // Bullet points (- or * at line start)
+            if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+                let indent = &line[..line.len() - trimmed.len()];
+                let bullet = &trimmed[..2];
+                let text = &trimmed[2..];
+                return Line::from(vec![
+                    Span::raw(indent.to_string()),
+                    Span::styled(bullet.to_string(), Style::default().fg(Color::Cyan)),
+                    Span::raw(text.to_string()),
+                ]);
+            }
+
+            // Regular text
+            Line::from(line)
         })
         .collect();
 
@@ -532,12 +654,16 @@ fn draw_tutorial_view(frame: &mut Frame, app: &App, title: &str, content: &str) 
         .block(Block::new().borders(Borders::ALL));
     frame.render_widget(paragraph, chunks[1]);
 
-    // Footer
+    // Footer with scroll indicator
     let scroll_info = if total_lines > visible_height {
+        let pct = if max_scroll > 0 {
+            (scroll * 100) / max_scroll
+        } else {
+            100
+        };
         format!(
-            " j/k: Scroll | d/u: Page | g/G: Top/Bottom | Line {}/{} | Esc: Back ",
-            scroll + 1,
-            total_lines
+            " j/k: Scroll | d/u: Page | g/G: Top/Bottom | {}% | Esc: Back ",
+            pct
         )
     } else {
         " Esc: Back ".to_string()
