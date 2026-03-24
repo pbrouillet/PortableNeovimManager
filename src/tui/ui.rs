@@ -21,6 +21,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Screen::TutorialList => draw_tutorial_list(frame, app),
         Screen::TutorialView { title, content, .. } => draw_tutorial_view(frame, app, title, content),
         Screen::Marketplace { instance_name } => draw_marketplace(frame, app, instance_name),
+        Screen::CreateInstance => draw_create_instance(frame, app),
     }
 }
 
@@ -156,7 +157,7 @@ fn draw_instance_list(frame: &mut Frame, app: &App) {
 
     // Footer
     let footer = Paragraph::new(Line::from(vec![Span::styled(
-        " q: Quit | Enter: Details | /: Search | t: Tutorials | p: Packages | f: Features | m: Leader | o: Open Dir | n: Nerd Font | s: Settings | l: Launch | u: Update | d: Delete ",
+        " q: Quit | Enter: Details | c: Create | /: Search | r: Refresh | s: Settings | t: Tutorials | n: Nerd Font ",
         Style::default().fg(Color::DarkGray),
     )]))
     .alignment(ratatui::layout::Alignment::Center)
@@ -167,12 +168,18 @@ fn draw_instance_list(frame: &mut Frame, app: &App) {
 fn draw_instance_detail(frame: &mut Frame, app: &App, name: &str) {
     let area = frame.area();
 
-    let chunks = Layout::vertical(vec![
-        Constraint::Length(3),
-        Constraint::Min(5),
-        Constraint::Length(3),
-    ])
-    .split(area);
+    let has_message = app.message.is_some();
+    let mut constraints = vec![
+        Constraint::Length(3),  // header
+        Constraint::Min(5),    // body
+    ];
+    if has_message {
+        constraints.push(Constraint::Length(2)); // status message
+    }
+    constraints.push(Constraint::Length(3)); // footer
+
+    let chunks = Layout::vertical(constraints).split(area);
+    let mut chunk_idx = 0;
 
     // Header
     let header = Paragraph::new(Line::from(vec![Span::styled(
@@ -183,7 +190,8 @@ fn draw_instance_detail(frame: &mut Frame, app: &App, name: &str) {
     )]))
     .alignment(ratatui::layout::Alignment::Center)
     .block(Block::new().borders(Borders::ALL));
-    frame.render_widget(header, chunks[0]);
+    frame.render_widget(header, chunks[chunk_idx]);
+    chunk_idx += 1;
 
     // Detail body
     let instance = app.instances.iter().find(|i| i.name == name);
@@ -237,24 +245,29 @@ fn draw_instance_detail(frame: &mut Frame, app: &App, name: &str) {
     let body = body
         .block(Block::new().borders(Borders::ALL).title(" Details "))
         .wrap(Wrap { trim: false });
-    frame.render_widget(body, chunks[1]);
+    frame.render_widget(body, chunks[chunk_idx]);
+    chunk_idx += 1;
+
+    // Status message (optional)
+    if has_message {
+        let msg = app.message.as_deref().unwrap_or("");
+        let message_widget = Paragraph::new(Line::from(Span::styled(
+            msg,
+            Style::default().fg(Color::Green),
+        )))
+        .alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(message_widget, chunks[chunk_idx]);
+        chunk_idx += 1;
+    }
 
     // Footer
-    let footer_text = if app.message.is_some() {
-        format!(
-            " {} | Esc: Back | f: Features | p: Packages | m: Leader Key | t: Tutorials | o: Open Dir | l: Launch | u: Update | d: Delete ",
-            app.message.as_deref().unwrap_or("")
-        )
-    } else {
-        " Esc: Back | f: Features | p: Packages | m: Leader Key | t: Tutorials | o: Open Dir | l: Launch | u: Update | d: Delete ".to_string()
-    };
     let footer = Paragraph::new(Line::from(vec![Span::styled(
-        footer_text,
+        " Esc: Back | l: Launch | u: Update | d: Delete | f: Features | p: Packages | m: Leader | t: Tutorials | o: Open Dir ",
         Style::default().fg(Color::DarkGray),
     )]))
     .alignment(ratatui::layout::Alignment::Center)
     .block(Block::new().borders(Borders::ALL));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(footer, chunks[chunk_idx]);
 }
 
 fn draw_edit_features(frame: &mut Frame, app: &App, name: &str) {
@@ -944,6 +957,136 @@ fn draw_tutorial_view(frame: &mut Frame, app: &App, title: &str, content: &str) 
     .alignment(ratatui::layout::Alignment::Center)
     .block(Block::new().borders(Borders::ALL));
     frame.render_widget(footer, chunks[2]);
+}
+
+// ── Create Instance ─────────────────────────────────────────────────────────
+
+fn draw_create_instance(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    let has_error = app.create_error.is_some();
+    let mut constraints = vec![
+        Constraint::Length(3),  // header
+        Constraint::Length(5),  // form (name + preset)
+        Constraint::Min(3),    // preset details
+    ];
+    if has_error {
+        constraints.push(Constraint::Length(2)); // error message
+    }
+    constraints.push(Constraint::Length(3)); // footer
+
+    let chunks = Layout::vertical(constraints).split(area);
+    let mut chunk_idx = 0;
+
+    // Header
+    let header = Paragraph::new(Line::from(vec![Span::styled(
+        " Create New Instance ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(ratatui::layout::Alignment::Center)
+    .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(header, chunks[chunk_idx]);
+    chunk_idx += 1;
+
+    // Form fields
+    let name_style = if app.create_field_cursor == 0 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let preset_style = if app.create_field_cursor == 1 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let name_display = if app.create_field_cursor == 0 {
+        format!("{}▏", app.create_name)
+    } else if app.create_name.is_empty() {
+        "(enter name)".to_string()
+    } else {
+        app.create_name.clone()
+    };
+
+    let preset_name = app.registry.presets
+        .get(app.create_preset_cursor)
+        .map(|p| p.name.as_str())
+        .unwrap_or("(none)");
+    let preset_display = if app.create_field_cursor == 1 {
+        format!("◀ {preset_name} ▶")
+    } else {
+        preset_name.to_string()
+    };
+
+    let form_lines = vec![
+        Line::from(vec![
+            Span::styled("  Name:   ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(name_display, name_style),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Preset: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(preset_display, preset_style),
+        ]),
+    ];
+    let form = Paragraph::new(form_lines)
+        .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(form, chunks[chunk_idx]);
+    chunk_idx += 1;
+
+    // Preset details
+    let preset_info = if let Some(preset) = app.registry.presets.get(app.create_preset_cursor) {
+        let workloads_str = if preset.workloads.is_empty() {
+            "  (base workloads only)".to_string()
+        } else {
+            format!("  {}", preset.workloads.join(", "))
+        };
+        vec![
+            Line::from(Span::styled(
+                format!("  {}", preset.description),
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Workloads: ", Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(Span::styled(workloads_str, Style::default().fg(Color::Green))),
+        ]
+    } else {
+        vec![Line::from("")]
+    };
+    let details = Paragraph::new(preset_info)
+        .block(Block::new().borders(Borders::ALL).title(" Preset Info "));
+    frame.render_widget(details, chunks[chunk_idx]);
+    chunk_idx += 1;
+
+    // Error message (optional)
+    if has_error {
+        let err = app.create_error.as_deref().unwrap_or("");
+        let error_widget = Paragraph::new(Line::from(Span::styled(
+            err,
+            Style::default().fg(Color::Red),
+        )))
+        .alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(error_widget, chunks[chunk_idx]);
+        chunk_idx += 1;
+    }
+
+    // Footer
+    let footer_text = if app.create_field_cursor == 0 {
+        " Type instance name | Tab/↓: Preset | Enter: Create | Esc: Cancel "
+    } else {
+        " ←/→: Cycle preset | Tab/↑: Name | Enter: Create | Esc: Cancel "
+    };
+    let footer = Paragraph::new(Line::from(vec![Span::styled(
+        footer_text,
+        Style::default().fg(Color::DarkGray),
+    )]))
+    .alignment(ratatui::layout::Alignment::Center)
+    .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(footer, chunks[chunk_idx]);
 }
 
 fn draw_marketplace(frame: &mut Frame, app: &App, instance_name: &str) {

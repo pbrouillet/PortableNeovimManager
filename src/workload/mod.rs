@@ -13,7 +13,7 @@ mod tests {
     #[test]
     fn test_default_registry_has_all_workloads() {
         let reg = default_registry();
-        assert_eq!(reg.all().len(), 16);
+        assert_eq!(reg.all().len(), 17);
     }
 
     #[test]
@@ -60,7 +60,7 @@ mod tests {
         let reg = default_registry();
         let topics = reg.all_tutorial_topics();
         assert!(!topics.is_empty());
-        assert_eq!(topics.len(), 18);
+        assert_eq!(topics.len(), 19);
     }
 
     #[test]

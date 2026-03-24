@@ -26,6 +26,7 @@ pub enum Screen {
     TutorialList,
     TutorialView { title: String, content: String },
     Marketplace { instance_name: String },
+    CreateInstance,
 }
 
 // ── App state ───────────────────────────────────────────────────────────────
@@ -119,6 +120,14 @@ pub struct App {
     pub marketplace_installed: Vec<String>,
     /// Loading/error message for marketplace
     pub marketplace_status: Option<String>,
+    /// Name input for creating a new instance
+    pub create_name: String,
+    /// Cursor position in the create form (0 = name, 1 = preset)
+    pub create_field_cursor: usize,
+    /// Selected preset index (into registry.presets)
+    pub create_preset_cursor: usize,
+    /// Validation error message for the create form
+    pub create_error: Option<String>,
 }
 
 impl App {
@@ -159,6 +168,10 @@ impl App {
             marketplace_selected: std::collections::HashSet::new(),
             marketplace_installed: Vec::new(),
             marketplace_status: None,
+            create_name: String::new(),
+            create_field_cursor: 0,
+            create_preset_cursor: 1, // default to ide-core
+            create_error: None,
         }
     }
 
@@ -532,6 +545,15 @@ impl App {
         self.message = None;
     }
 
+    fn enter_create_instance(&mut self) {
+        self.create_name.clear();
+        self.create_field_cursor = 0;
+        self.create_preset_cursor = 1; // default to ide-core
+        self.create_error = None;
+        self.screen = Screen::CreateInstance;
+        self.message = None;
+    }
+
     fn update_marketplace_filter(&mut self) {
         let Some(ref reg) = self.marketplace_registry else {
             self.marketplace_packages = Vec::new();
@@ -721,6 +743,9 @@ pub async fn run(settings: GlobalSettings) -> Result<(), Box<dyn std::error::Err
                         let instance_name = instance_name.clone();
                         handle_marketplace_keys(&mut app, key.code, &instance_name).await;
                     }
+                    Screen::CreateInstance => {
+                        handle_create_keys(&mut app, key.code, &mut terminal).await;
+                    }
                 }
             }
         }
@@ -790,42 +815,11 @@ async fn handle_list_keys(
             }
         }
         KeyCode::Char('c') => {
-            app.message = Some("Use CLI: pnm create <name>".to_string());
+            app.enter_create_instance();
         }
         KeyCode::Char('r') => {
             app.refresh_instances();
             app.message = Some("Refreshed instance list.".to_string());
-        }
-        KeyCode::Char('l') => {
-            if let Some(name) = app.selected_name() {
-                do_launch(&name, app, terminal);
-            }
-        }
-        KeyCode::Char('u') => {
-            if let Some(name) = app.selected_name() {
-                do_update(&name, app, terminal).await;
-            }
-        }
-        KeyCode::Char('d') => {
-            if let Some(name) = app.selected_name() {
-                app.screen = Screen::ConfirmDelete { name };
-                app.message = None;
-            }
-        }
-        KeyCode::Char('f') => {
-            if let Some(name) = app.selected_name() {
-                app.enter_edit_features(&name);
-            }
-        }
-        KeyCode::Char('m') => {
-            if let Some(name) = app.selected_name() {
-                app.enter_edit_leader(&name);
-            }
-        }
-        KeyCode::Char('o') => {
-            if let Some(name) = app.selected_name() {
-                open_instance_dir(&name, app);
-            }
         }
         KeyCode::Char('n') => {
             do_install_font(app, terminal).await;
@@ -839,11 +833,6 @@ async fn handle_list_keys(
         }
         KeyCode::Char('t') => {
             app.open_tutorial_list(Screen::InstanceList);
-        }
-        KeyCode::Char('p') => {
-            if let Some(name) = app.selected_name() {
-                app.enter_marketplace(&name);
-            }
         }
         KeyCode::Char('/') => {
             app.instance_search_active = true;
@@ -1335,6 +1324,130 @@ fn handle_confirm_delete_keys(app: &mut App, code: KeyCode, name: &str) {
             }
         }
         _ => {}
+    }
+}
+
+async fn handle_create_keys(
+    app: &mut App,
+    code: KeyCode,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    // When on the name field (field 0), capture text input
+    if app.create_field_cursor == 0 {
+        match code {
+            KeyCode::Esc => {
+                app.screen = Screen::InstanceList;
+                app.message = None;
+                return;
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                app.create_field_cursor = 1;
+                return;
+            }
+            KeyCode::Enter => {
+                // Fall through to the create logic below
+            }
+            KeyCode::Backspace => {
+                app.create_name.pop();
+                // Live validation
+                if !app.create_name.is_empty() {
+                    app.create_error = crate::cli::validate_instance_name(&app.create_name).err();
+                } else {
+                    app.create_error = None;
+                }
+                return;
+            }
+            KeyCode::Char(c) => {
+                app.create_name.push(c);
+                // Live validation
+                app.create_error = crate::cli::validate_instance_name(&app.create_name).err();
+                return;
+            }
+            _ => return,
+        }
+    }
+
+    // When on the preset field (field 1)
+    if app.create_field_cursor == 1 && code != KeyCode::Enter {
+        match code {
+            KeyCode::Esc => {
+                app.screen = Screen::InstanceList;
+                app.message = None;
+                return;
+            }
+            KeyCode::Tab | KeyCode::Up | KeyCode::BackTab => {
+                app.create_field_cursor = 0;
+                return;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                let count = app.registry.presets.len();
+                if count > 0 {
+                    app.create_preset_cursor = if app.create_preset_cursor == 0 {
+                        count - 1
+                    } else {
+                        app.create_preset_cursor - 1
+                    };
+                }
+                return;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let count = app.registry.presets.len();
+                if count > 0 {
+                    app.create_preset_cursor = (app.create_preset_cursor + 1) % count;
+                }
+                return;
+            }
+            _ => return,
+        }
+    }
+
+    // Enter pressed — attempt creation
+    if code == KeyCode::Enter {
+        if app.create_name.is_empty() {
+            app.create_error = Some("Name cannot be empty.".to_string());
+            app.create_field_cursor = 0;
+            return;
+        }
+        if let Err(e) = crate::cli::validate_instance_name(&app.create_name) {
+            app.create_error = Some(e);
+            app.create_field_cursor = 0;
+            return;
+        }
+
+        // Check if instance already exists
+        let instance_dir = config::instance_dir(&app.settings, &app.create_name);
+        if instance_dir.exists() {
+            app.create_error = Some(format!("Instance '{}' already exists.", app.create_name));
+            app.create_field_cursor = 0;
+            return;
+        }
+
+        // Resolve preset to feature list
+        let features = if let Some(preset) = app.registry.presets.get(app.create_preset_cursor) {
+            preset.workloads.clone()
+        } else {
+            Vec::new()
+        };
+
+        let name = app.create_name.clone();
+        leave_tui(terminal);
+        println!("Creating instance '{}' ...", name);
+
+        match crate::instance::create(&name, None, features, &app.registry, &app.settings).await {
+            Ok(()) => {
+                app.refresh_instances();
+                app.message = Some(format!("✓ Created instance '{name}'."));
+            }
+            Err(e) => {
+                eprintln!("Create failed: {e}");
+                app.message = Some(format!("Create failed: {e}"));
+            }
+        }
+
+        println!("\nPress Enter to return to TUI...");
+        let _ = std::io::stdin().read_line(&mut String::new());
+        enter_tui(terminal);
+        app.screen = Screen::InstanceList;
     }
 }
 
