@@ -99,6 +99,22 @@ pnm features dev --enable dap,tabs
 pnm features dev --disable treeview
 ```
 
+### `pnm marketplace`
+
+Browse and install LSP servers, DAP adapters, formatters, and linters from the [mason-registry](https://github.com/mason-org/mason-registry).
+
+```bash
+pnm marketplace search python          # Search packages
+pnm marketplace list --category lsp    # List LSP servers
+pnm marketplace list --language Rust   # List Rust tools
+pnm marketplace info pyright           # Show package details
+pnm marketplace install dev pyright rust-analyzer debugpy  # Add to instance
+pnm marketplace remove dev pyright     # Remove from instance
+pnm marketplace refresh                # Update the cached registry
+```
+
+Installed packages are auto-installed by Mason on the next Neovim launch. The registry is cached locally and refreshed on demand.
+
 ### `pnm init`
 
 Create a default `settings.json` next to the executable. Safe to run multiple times — won't overwrite an existing file.
@@ -126,6 +142,7 @@ The TUI provides a keyboard-driven interface for everything the CLI can do.
 | `o` | Open instance directory in file manager |
 | `n` | Install Nerd Font (JetBrainsMono) |
 | `s` | Initialize settings.json |
+| `p` | Browse & install packages (marketplace) |
 | `r` | Refresh list |
 | `q` / `Esc` | Quit |
 
@@ -136,6 +153,10 @@ Navigate with `j`/`k`, toggle with `Space`, apply with `Enter`. Dependencies are
 ### Edit Leader Key screen
 
 Choose from Space, Comma, Backslash, or Semicolon. Applied immediately to `init.lua` on `Enter`.
+
+### Marketplace screen
+
+Browse the mason-registry catalog of 500+ packages. Navigate with `j`/`k`, switch categories with `Tab`, search with `/`, toggle packages with `Space`, and apply with `Enter`. Installed packages show a `●` marker.
 
 ## Features (Workloads)
 
@@ -163,6 +184,8 @@ Features are modular plugin bundles. Base features are always included; optional
 ### Customizing Workloads
 
 On first run, a `workloads.json` file is generated next to the executable with all built-in definitions. Edit it to add plugins, change keybindings, or define entirely new workloads.
+
+Additionally, use `pnm marketplace` to browse and install individual LSP servers, DAP adapters, formatters, and linters from the mason-registry — these are auto-installed by Mason on next launch.
 
 ## Global Settings
 

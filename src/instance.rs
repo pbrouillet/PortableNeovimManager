@@ -7,7 +7,7 @@ use crate::archive;
 use crate::config::{self, GlobalSettings, InstanceManifest};
 use crate::github;
 use crate::neovim;
-use crate::plugins::generate_init_lua;
+use crate::plugins;
 use crate::workload::WorkloadRegistry;
 
 // ---------------------------------------------------------------------------
@@ -42,34 +42,18 @@ pub enum InstanceError {
 }
 
 // ---------------------------------------------------------------------------
-// create
+// Shared download/install helper
 // ---------------------------------------------------------------------------
 
-pub async fn create(
-    name: &str,
-    version: Option<&str>,
-    features: Vec<String>,
-    registry: &WorkloadRegistry,
-    settings: &GlobalSettings,
+async fn download_and_install(
+    bin_dir: &std::path::Path,
+    tmp_dir: &std::path::Path,
+    release: &github::Release,
 ) -> Result<(), InstanceError> {
-    let instance_dir = config::instance_dir(settings, name);
-    if instance_dir.exists() {
-        return Err(InstanceError::AlreadyExists(name.to_string()));
-    }
-
-    let base = config::ensure_instance_dirs(settings, name)?;
-
-    // Fetch the release
-    let release = match version {
-        Some(tag) => github::fetch_release_by_tag(tag).await?,
-        None => github::fetch_latest_stable().await?,
-    };
-
-    let asset = github::select_asset(&release)?;
+    let asset = github::select_asset(release)?;
 
     println!("Downloading {} ({})", asset.name, format_bytes(asset.size));
 
-    // Progress bar
     let pb = ProgressBar::new(asset.size);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -88,19 +72,45 @@ pub async fn create(
 
     pb.finish_with_message("Download complete");
 
-    // Extract to a temp dir inside the instance
-    let tmp_dir = base.join("_tmp");
-    fs::create_dir_all(&tmp_dir)?;
+    fs::create_dir_all(tmp_dir)?;
 
     println!("Extracting {}...", asset.name);
-    archive::extract(&data, &tmp_dir, &asset.name)?;
+    archive::extract(&data, tmp_dir, &asset.name)?;
 
-    // Install the extracted neovim tree into bin/
-    let bin_dir = base.join("bin");
-    archive::install_nvim_binary(&tmp_dir, &bin_dir)?;
+    archive::install_nvim_binary(tmp_dir, bin_dir)?;
 
     // Clean up temp extraction dir
-    fs::remove_dir_all(&tmp_dir)?;
+    fs::remove_dir_all(tmp_dir)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// create
+// ---------------------------------------------------------------------------
+
+pub async fn create(
+    name: &str,
+    version: Option<&str>,
+    features: Vec<String>,
+    registry: &WorkloadRegistry,
+    settings: &GlobalSettings,
+) -> Result<(), InstanceError> {
+    let instance_dir = config::instance_dir(settings, name);
+    if instance_dir.exists() {
+        return Err(InstanceError::AlreadyExists(name.to_string()));
+    }
+
+    let base = config::ensure_instance_dirs(settings, name)?;
+
+    let release = match version {
+        Some(tag) => github::fetch_release_by_tag(tag).await?,
+        None => github::fetch_latest_stable().await?,
+    };
+
+    let bin_dir = base.join("bin");
+    let tmp_dir = base.join("_tmp");
+    download_and_install(&bin_dir, &tmp_dir, &release).await?;
 
     // Create and save manifest
     let manifest =
@@ -109,7 +119,7 @@ pub async fn create(
 
     // Generate and write init.lua
     let data_dir = base.join("data");
-    let init_lua = generate_init_lua(&data_dir, registry, &features, &manifest.leader_key);
+    let init_lua = plugins::generate_init_lua(&data_dir, registry, &features, &manifest.leader_key, &manifest.mason_packages);
     let init_lua_path = base.join("config").join("nvim").join("init.lua");
     fs::write(&init_lua_path, init_lua)?;
 
@@ -167,7 +177,6 @@ pub async fn update(name: &str, version: Option<&str>, settings: &GlobalSettings
     let manifest_path = InstanceManifest::manifest_path(&base);
     let mut manifest = InstanceManifest::load(&manifest_path)?;
 
-    // Fetch target release
     let release = match version {
         Some(tag) => github::fetch_release_by_tag(tag).await?,
         None => github::fetch_latest_stable().await?,
@@ -181,38 +190,10 @@ pub async fn update(name: &str, version: Option<&str>, settings: &GlobalSettings
         return Ok(());
     }
 
-    let asset = github::select_asset(&release)?;
-
     println!(
         "Updating '{}': {} → {}",
         name, manifest.nvim_version, release.tag_name,
     );
-    println!("Downloading {} ({})", asset.name, format_bytes(asset.size));
-
-    let pb = ProgressBar::new(asset.size);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})",
-            )
-            .unwrap()
-            .progress_chars("█▓░"),
-    );
-
-    let data = github::download_asset_with_progress(asset, |downloaded, total| {
-        pb.set_length(total);
-        pb.set_position(downloaded);
-    })
-    .await?;
-
-    pb.finish_with_message("Download complete");
-
-    // Extract to temp dir
-    let tmp_dir = base.join("_tmp");
-    fs::create_dir_all(&tmp_dir)?;
-
-    println!("Extracting {}...", asset.name);
-    archive::extract(&data, &tmp_dir, &asset.name)?;
 
     // Remove old bin/ contents before installing new
     let bin_dir = base.join("bin");
@@ -221,11 +202,8 @@ pub async fn update(name: &str, version: Option<&str>, settings: &GlobalSettings
         fs::create_dir_all(&bin_dir)?;
     }
 
-    // Install new binary
-    archive::install_nvim_binary(&tmp_dir, &bin_dir)?;
-
-    // Clean up
-    fs::remove_dir_all(&tmp_dir)?;
+    let tmp_dir = base.join("_tmp");
+    download_and_install(&bin_dir, &tmp_dir, &release).await?;
 
     // Update manifest
     manifest.nvim_version = release.tag_name.clone();
@@ -277,9 +255,17 @@ pub fn update_features(
     manifest.workloads = features.clone();
     manifest.updated_at = Utc::now();
 
-    // Regenerate init.lua with updated features
+    // Regenerate init.lua with updated features, respecting feature-level overrides
     let data_dir = base.join("data");
-    let init_lua = generate_init_lua(&data_dir, registry, &features, &manifest.leader_key);
+    let init_lua = crate::plugins::generate_init_lua_full(
+        &data_dir,
+        registry,
+        &features,
+        &manifest.disabled_features,
+        &manifest.extra_features,
+        &manifest.leader_key,
+        &manifest.mason_packages,
+    );
     let init_lua_path = base.join("config").join("nvim").join("init.lua");
     fs::write(&init_lua_path, init_lua)?;
 

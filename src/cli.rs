@@ -15,6 +15,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Create a new portable Neovim instance
+    #[command(after_long_help = "EXAMPLES:\n  pnm create my-env\n  pnm create my-env --version v0.10.4\n  pnm create my-env --features lsp,treeview,tabs\n  pnm create my-env --features @ide-core\n  pnm create my-env --features @ide-full,python")]
     Create {
         /// Name for the instance
         name: String,
@@ -33,6 +34,7 @@ pub enum Commands {
         name: String,
     },
     /// Launch a portable Neovim instance
+    #[command(after_long_help = "EXAMPLES:\n  pnm launch my-env\n  pnm launch my-env -- --clean\n  pnm launch my-env -- file.txt")]
     Launch {
         /// Instance name
         name: String,
@@ -49,6 +51,7 @@ pub enum Commands {
         version: Option<String>,
     },
     /// Delete a portable Neovim instance
+    #[command(after_long_help = "EXAMPLES:\n  pnm delete my-env\n  pnm delete my-env -y     # Skip confirmation")]
     Delete {
         /// Instance name
         name: String,
@@ -57,6 +60,7 @@ pub enum Commands {
         yes: bool,
     },
     /// Toggle features on an instance
+    #[command(after_long_help = "EXAMPLES:\n  pnm features my-env --enable lsp,treeview\n  pnm features my-env --enable @ide-core\n  pnm features my-env --disable dap\n  pnm features my-env --enable @ide-core --disable dap")]
     Features {
         /// Instance name
         name: String,
@@ -70,12 +74,63 @@ pub enum Commands {
     /// Initialize a default settings.json next to the executable
     Init,
     /// Show tutorials for features and workflows
+    #[command(after_long_help = "EXAMPLES:\n  pnm tutorial              # List all topics\n  pnm tutorial lsp          # Show LSP tutorial\n  pnm tutorial python       # Show Python setup guide\n  pnm tutorial leader-key   # Understand the leader key")]
     Tutorial {
         /// Topic to show (e.g. "leader-key", "python", "lsp"). Lists all if omitted.
         topic: Option<String>,
     },
+    /// Browse and install LSP servers, DAP adapters, formatters, and linters
+    #[command(after_long_help = "EXAMPLES:\n  pnm marketplace search python\n  pnm marketplace list --category lsp\n  pnm marketplace install myenv pyright debugpy\n  pnm marketplace remove myenv pyright\n  pnm marketplace refresh")]
+    Marketplace {
+        #[command(subcommand)]
+        action: MarketplaceAction,
+    },
     /// Open the interactive TUI
     Tui,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MarketplaceAction {
+    /// Search packages by name, language, or description
+    Search {
+        /// Search query
+        query: String,
+        /// Filter by category
+        #[arg(short, long)]
+        category: Option<String>,
+    },
+    /// List available packages
+    List {
+        /// Filter by category (lsp, dap, formatter, linter)
+        #[arg(short, long)]
+        category: Option<String>,
+        /// Filter by language
+        #[arg(short, long)]
+        language: Option<String>,
+    },
+    /// Install mason packages on an instance
+    Install {
+        /// Instance name
+        name: String,
+        /// Package names to install
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
+    /// Remove mason packages from an instance
+    Remove {
+        /// Instance name
+        name: String,
+        /// Package names to remove
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
+    /// Force refresh the cached package registry
+    Refresh,
+    /// Show detailed info about a package
+    Info {
+        /// Package name
+        name: String,
+    },
 }
 
 /// Resolves feature/workload identifiers to workload IDs.
@@ -84,25 +139,85 @@ pub enum Commands {
 ///   - @preset syntax (e.g. "@ide-core" → all workloads in that preset)
 ///   - Direct workload IDs (e.g. "Lsp")
 pub fn parse_features(features: &[String], registry: &WorkloadRegistry) -> Vec<String> {
-    features
-        .iter()
-        .flat_map(|f| {
-            if let Some(preset_id) = f.strip_prefix('@') {
-                if let Some(preset) = registry.find_preset(preset_id) {
-                    return preset.workloads.clone();
-                } else {
-                    eprintln!("Warning: unknown preset '@{preset_id}', skipping");
-                    return vec![];
+    let mut parsed: Vec<String> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+
+    for f in features {
+        if let Some(preset_id) = f.strip_prefix('@') {
+            if let Some(preset) = registry.find_preset(preset_id) {
+                for wl in &preset.workloads {
+                    if !parsed.contains(wl) {
+                        parsed.push(wl.clone());
+                    }
                 }
-            }
-            if let Some(workload) = registry.find_by_alias(f) {
-                vec![workload.id.clone()]
             } else {
-                eprintln!("Warning: unknown feature '{f}', skipping");
-                vec![]
+                unknown.push(format!("@{preset_id}"));
             }
-        })
-        .collect()
+            continue;
+        }
+        if let Some(workload) = registry.find_by_alias(f) {
+            if !parsed.contains(&workload.id) {
+                parsed.push(workload.id.clone());
+            }
+        } else {
+            unknown.push(f.clone());
+        }
+    }
+
+    if !unknown.is_empty() {
+        eprintln!(
+            "Warning: unknown feature(s) skipped: {}",
+            unknown.join(", ")
+        );
+    }
+
+    // Resolve transitive dependencies
+    let resolved = registry.resolve_dependencies(&parsed);
+
+    // Report auto-added dependencies
+    for id in &resolved {
+        if !parsed.contains(id) {
+            if let Some(w) = registry.find_by_id(id) {
+                eprintln!("Auto-enabled {} (required by dependency)", w.name);
+            }
+        }
+    }
+
+    resolved
+}
+
+/// Validates an instance name. Returns Ok(()) if valid, Err with message if not.
+pub fn validate_instance_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Instance name cannot be empty.".to_string());
+    }
+    if name.len() > 64 {
+        return Err("Instance name must be 64 characters or fewer.".to_string());
+    }
+    if name.starts_with('.') || name.starts_with('-') {
+        return Err(format!(
+            "Instance name '{}' cannot start with '.' or '-'.",
+            name
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(format!(
+            "Instance name '{}' contains invalid characters. Use only letters, digits, hyphens, underscores, and dots.",
+            name
+        ));
+    }
+    // Reserved names on Windows
+    let reserved = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
+        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    if reserved.contains(&name.to_lowercase().as_str()) {
+        return Err(format!("Instance name '{}' is a reserved name.", name));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -163,13 +278,9 @@ mod tests {
             result,
             vec![
                 "TreeView",
-                "TreeView",
                 "Tabs",
-                "Tabs",
+                "Lsp",
                 "OmniSharp",
-                "OmniSharp",
-                "Node",
-                "Node",
                 "Node",
                 "Python",
             ]
@@ -195,7 +306,7 @@ mod tests {
             .map(String::from)
             .collect();
         let result = parse_features(&input, &reg);
-        assert_eq!(result, vec!["Lsp", "Lsp", "Lsp"]);
+        assert_eq!(result, vec!["Lsp"]);
     }
 
     #[test]
@@ -229,5 +340,24 @@ mod tests {
             .collect();
         let result = parse_features(&input, &reg);
         assert_eq!(result, vec!["Lsp", "Completion", "Git", "TreeView", "Tabs", "Editing", "Statusline", "Python"]);
+    }
+
+    #[test]
+    fn test_validate_instance_name_valid() {
+        assert!(validate_instance_name("my-env").is_ok());
+        assert!(validate_instance_name("test_setup").is_ok());
+        assert!(validate_instance_name("env.1").is_ok());
+        assert!(validate_instance_name("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_instance_name_invalid() {
+        assert!(validate_instance_name("").is_err());
+        assert!(validate_instance_name(".hidden").is_err());
+        assert!(validate_instance_name("-start").is_err());
+        assert!(validate_instance_name("has space").is_err());
+        assert!(validate_instance_name("has/slash").is_err());
+        assert!(validate_instance_name("CON").is_err());
+        assert!(validate_instance_name("nul").is_err());
     }
 }

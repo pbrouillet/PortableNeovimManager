@@ -12,8 +12,9 @@ pub fn generate_init_lua(
     registry: &WorkloadRegistry,
     enabled_ids: &[String],
     leader_key: &str,
+    mason_packages: &[String],
 ) -> String {
-    generate_init_lua_full(data_dir, registry, enabled_ids, &[], &[], leader_key)
+    generate_init_lua_full(data_dir, registry, enabled_ids, &[], &[], leader_key, mason_packages)
 }
 
 /// Full version with feature-level overrides.
@@ -24,6 +25,7 @@ pub fn generate_init_lua_full(
     disabled_features: &[String],
     extra_features: &[String],
     leader_key: &str,
+    mason_packages: &[String],
 ) -> String {
     let lazy_path = data_dir.join("lazy").join("lazy.nvim");
     let lazy_path_str = lazy_path.to_string_lossy().replace('\\', "/");
@@ -87,6 +89,36 @@ pub fn generate_init_lua_full(
         format!("\n{}\n", config_blocks.join("\n\n"))
     };
 
+    let mason_ensure_lua = if mason_packages.is_empty() {
+        String::new()
+    } else {
+        let names = mason_packages
+            .iter()
+            .map(|n| format!(r#"  "{}""#, n))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!(
+            r#"
+-- Mason ensure_installed (managed by pnm marketplace)
+local mason_ensure = {{
+{names}
+}}
+vim.defer_fn(function()
+  local ok, mr = pcall(require, "mason-registry")
+  if not ok then return end
+  mr.refresh(function()
+    for _, name in ipairs(mason_ensure) do
+      local p_ok, pkg = pcall(mr.get_package, name)
+      if p_ok and pkg and not pkg:is_installed() then
+        pkg:install()
+      end
+    end
+  end)
+end, 1000)
+"#
+        )
+    };
+
     format!(
         r#"-- Portable Neovim Manager — auto-generated init.lua
 -- Modify with caution; this file is regenerated when features change.
@@ -113,7 +145,7 @@ vim.g.maplocalleader = "{leader_lua}"
 require("lazy").setup({{
 {specs_lua}
 }})
-{feature_configs_lua}
+{feature_configs_lua}{mason_ensure_lua}
 -- Basic settings
 vim.opt.number = true
 vim.opt.relativenumber = true
@@ -143,7 +175,7 @@ mod tests {
     fn test_generate_init_lua_contains_lazy_bootstrap() {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
-        let output = generate_init_lua(data_dir, &reg, &[], " ");
+        let output = generate_init_lua(data_dir, &reg, &[], " ", &[]);
         assert!(
             output.contains("lazy.nvim"),
             "output should mention lazy.nvim"
@@ -158,7 +190,7 @@ mod tests {
     fn test_generate_init_lua_includes_base_features() {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
-        let output = generate_init_lua(data_dir, &reg, &[], " ");
+        let output = generate_init_lua(data_dir, &reg, &[], " ", &[]);
         assert!(
             output.contains("telescope"),
             "base features should include telescope"
@@ -174,7 +206,7 @@ mod tests {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
         let enabled = vec!["Lsp".to_string()];
-        let output = generate_init_lua(data_dir, &reg, &enabled, " ");
+        let output = generate_init_lua(data_dir, &reg, &enabled, " ", &[]);
         assert!(
             output.contains("nvim-lspconfig"),
             "LSP feature should include nvim-lspconfig plugin"
@@ -189,7 +221,7 @@ mod tests {
     fn test_generate_init_lua_includes_base_feature_configs() {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
-        let output = generate_init_lua(data_dir, &reg, &[], " ");
+        let output = generate_init_lua(data_dir, &reg, &[], " ", &[]);
         assert!(
             output.contains("Telescope find_files"),
             "base Telescope config should include find_files keymap"
@@ -205,7 +237,7 @@ mod tests {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
         let enabled = vec!["TreeView".to_string()];
-        let output = generate_init_lua(data_dir, &reg, &enabled, " ");
+        let output = generate_init_lua(data_dir, &reg, &enabled, " ", &[]);
         assert!(
             output.contains("neo-tree.nvim"),
             "TreeView should use neo-tree plugin"
@@ -229,7 +261,7 @@ mod tests {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
         let enabled = vec!["Tabs".to_string()];
-        let output = generate_init_lua(data_dir, &reg, &enabled, " ");
+        let output = generate_init_lua(data_dir, &reg, &enabled, " ", &[]);
         assert!(
             output.contains(r#"require("bufferline").setup"#),
             "Tabs should include bufferline setup config"
@@ -249,7 +281,7 @@ mod tests {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
         let enabled = vec!["Lsp".to_string()];
-        let output = generate_init_lua(data_dir, &reg, &enabled, " ");
+        let output = generate_init_lua(data_dir, &reg, &enabled, " ", &[]);
         assert!(
             !output.contains("-- Feature: Lsp"),
             "LSP should not have a feature config block"
@@ -260,7 +292,7 @@ mod tests {
     fn test_generate_init_lua_default_leader_key() {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
-        let output = generate_init_lua(data_dir, &reg, &[], " ");
+        let output = generate_init_lua(data_dir, &reg, &[], " ", &[]);
         assert!(
             output.contains(r#"vim.g.mapleader = " ""#),
             "default leader key should be space"
@@ -271,7 +303,7 @@ mod tests {
     fn test_generate_init_lua_custom_leader_key() {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
-        let output = generate_init_lua(data_dir, &reg, &[], ",");
+        let output = generate_init_lua(data_dir, &reg, &[], ",", &[]);
         assert!(
             output.contains(r#"vim.g.mapleader = ",""#),
             "leader key should be comma"
@@ -286,7 +318,7 @@ mod tests {
     fn test_generate_init_lua_backslash_leader_key() {
         let reg = default_registry();
         let data_dir = Path::new("/tmp/pnm_test_data");
-        let output = generate_init_lua(data_dir, &reg, &[], "\\");
+        let output = generate_init_lua(data_dir, &reg, &[], "\\", &[]);
         assert!(
             output.contains(r#"vim.g.mapleader = "\\""#),
             "backslash leader should be escaped in Lua"

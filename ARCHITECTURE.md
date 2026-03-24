@@ -18,11 +18,15 @@ This document describes the internal structure of Portable Neovim Manager (pnm) 
                                       └──────────┘
 
 Supporting modules:
-  github.rs   ─ GitHub Releases API client
-  archive.rs  ─ ZIP/tar.gz extraction + binary installation
-  workload.rs ─ Feature/plugin registry
-  plugins/    ─ init.lua code generation
-  font.rs     ─ Nerd Font installer
+  github.rs     ─ GitHub Releases API client
+  archive.rs    ─ ZIP/tar.gz extraction + binary installation
+  workload/     ─ Feature/plugin registry (split into submodules)
+    model.rs    ─ Data structures (Feature, Workload, Preset, etc.)
+    loader.rs   ─ JSON loading/writing
+    defaults.rs ─ Built-in workload/preset/tutorial defaults
+  plugins/      ─ init.lua code generation
+  font.rs       ─ Nerd Font installer
+  mason_registry/ ─ Mason package registry client (fetch + cache + model)
 ```
 
 ## Module Breakdown
@@ -51,9 +55,15 @@ main()
 
 Owns two data structures and the directory layout:
 
-**`GlobalSettings`** — App-wide configuration loaded from `settings.json` next to the executable. Currently holds `instances_dir` (where instances live). Every field uses `#[serde(default)]` for forward-compatibility — new fields can be added without breaking existing files.
+**`GlobalSettings`** — App-wide configuration loaded from `settings.json` next to the executable. Fields:
+- `instances_dir` — where instances live (default: `~/.portable-nvim/instances`)
+- `default_version` — default Neovim version for new instances (None = latest stable)
+- `default_leader_key` — default leader key for new instances (default: Space)
+- `confirm_destructive` — require confirmation for delete/update (default: true)
 
-**`InstanceManifest`** — Per-instance metadata stored as `manifest.json` inside the instance directory. Tracks name, Neovim version, enabled workloads, disabled/extra features, leader key, and timestamps. Old manifests with `features` field are auto-migrated to `workloads` via serde alias.
+Every field uses `#[serde(default)]` for forward-compatibility — new fields can be added without breaking existing files.
+
+**`InstanceManifest`** — Per-instance metadata stored as `manifest.json` inside the instance directory. Tracks name, Neovim version, enabled workloads, disabled/extra features, leader key, mason packages, and timestamps. Old manifests with `features` field are auto-migrated to `workloads` via serde alias.
 
 **Directory helpers** — `instances_dir()`, `instance_dir()`, and `ensure_instance_dirs()` all accept `&GlobalSettings` so the storage location is configurable.
 
@@ -61,30 +71,30 @@ Owns two data structures and the directory layout:
 
 Orchestrates the full lifecycle of an instance:
 
+**Shared helper** (`download_and_install`): Encapsulates the common download/extract/install flow used by both create and update — asset selection, progress-bar download, extraction to temp dir, binary installation, cleanup.
+
 **Create:**
 1. Validate instance doesn't already exist
 2. Create directory skeleton (`bin/`, `config/nvim/`, `data/`, `cache/`, `state/`)
 3. Fetch release from GitHub (latest stable or specific tag)
-4. Download asset with progress bar
-5. Extract archive to temp dir
-6. Install Neovim binary tree into `bin/`
-7. Generate `init.lua` from enabled workloads
-8. Save `manifest.json`
+4. Download and install via shared helper
+5. Generate `init.lua` from enabled workloads
+6. Save `manifest.json`
 
 **Update:**
 1. Load existing manifest
 2. Fetch target release
 3. Compare versions (skip if already up to date)
-4. Download + extract new binary
-5. Replace `bin/` contents
+4. Remove old `bin/` contents
+5. Download and install new binary via shared helper
 6. Update manifest version and timestamp
 
 **Delete:** Remove the entire instance directory.
 
 **Update Features:**
 1. Load manifest
-2. Modify feature list
-3. Regenerate `init.lua` with new feature set
+2. Modify workload list
+3. Regenerate `init.lua` with new feature set, respecting `disabled_features` and `extra_features`
 4. Save manifest
 
 ### `neovim.rs` — Binary Discovery and Launch
@@ -132,9 +142,11 @@ Handles two archive formats:
 
 **`install_nvim_binary`** takes the extracted temp directory and copies the Neovim file tree into the instance's `bin/` directory using recursive directory copying. It finds the top-level extracted folder (e.g., `nvim-win64`) and copies its entire contents.
 
-### `workload.rs` — Feature/Plugin Registry
+### `workload/` — Feature/Plugin Registry
 
-The registry uses a two-level hierarchy — **Workloads** contain **Features**:
+Split into focused submodules under `workload/`:
+
+**`workload/model.rs`** — Data structures and query methods:
 
 ```rust
 struct Feature {
@@ -161,13 +173,19 @@ struct Preset {
 }
 ```
 
+`WorkloadRegistry` provides query methods: `find_by_id`, `find_by_alias`, `find_preset`, `dependents_of`, `resolve_dependencies` (transitive), `validate_workloads`, `tutorial_content`, etc.
+
+**`workload/loader.rs`** — Loading `workloads.json` from disk, writing defaults on first run, normalization of old-format workloads.
+
+**`workload/defaults.rs`** — Built-in default workloads, presets, and tutorials embedded in the binary.
+
+**Dependency resolution:** `resolve_dependencies()` transitively resolves `depends_on` chains. The CLI uses this to auto-enable required workloads (e.g., enabling Python auto-enables Lsp).
+
 Toggling a workload enables/disables all its features in bulk. Individual features can also be toggled within an expanded workload in the TUI.
 
-**Presets** provide quick bulk-enable: `@minimal` (base only), `@ide-core` (LSP + tree view + tabs), `@ide-full` (everything).
+**Presets** provide quick bulk-enable: `@minimal` (base only), `@ide-core` (LSP + completion + git + tree view + tabs + editing + statusline), `@ide-full` (everything).
 
 **Loading:** On first run, `workloads.json` is generated next to the executable from built-in defaults. On subsequent runs it's loaded from disk. If parsing fails, built-in defaults are used. Old-format workloads (plugins/config_lua on workload instead of features) are auto-migrated via `normalize()`.
-
-**Dependency tracking:** The registry tracks which workloads depend on which. The TUI uses `dependents_of()` to auto-disable features when their dependency is turned off, and the reverse when enabling.
 
 ### `plugins/init_lua.rs` — Lua Code Generation
 
@@ -179,8 +197,9 @@ Generates a complete `init.lua` for an instance:
 4. **Feature configs** — appends each workload's `config_lua` block (keymaps, plugin setup calls)
 5. **Base settings** — line numbers, termguicolors, clipboard, undo, search
 6. **User hook** — loads `user.lua` from the config directory if it exists
+7. **Mason ensure_installed** — if `mason_packages` is non-empty, generates a deferred block that uses the mason-registry Lua API to auto-install selected tools on launch
 
-The init.lua is regenerated whenever features or the leader key change. Users should put customizations in `user.lua` rather than editing `init.lua` directly.
+The init.lua is regeneratedwhenever features or the leader key change. Users should put customizations in `user.lua` rather than editing `init.lua` directly.
 
 ### `font.rs` — Nerd Font Installer
 
@@ -192,11 +211,36 @@ Downloads and installs JetBrainsMono Nerd Font from GitHub. Platform-specific in
 
 Checks for existing font files before downloading to avoid reinstallation.
 
+### `mason_registry/` — Mason Package Registry Client
+
+Fetches, caches, and queries the [mason-registry](https://github.com/mason-org/mason-registry) — the canonical catalog of LSP servers, DAP adapters, formatters, and linters used by mason.nvim.
+
+**`mason_registry/model.rs`** — Data structures:
+
+```rust
+enum MasonCategory { Lsp, Dap, Formatter, Linter }
+
+struct MasonPackage {
+    name: String,           // "pyright", "rust-analyzer", etc.
+    description: String,
+    homepage: String,
+    languages: Vec<String>, // ["Python"], ["Rust"], etc.
+    categories: Vec<MasonCategory>,
+    neovim: Option<MasonNeovimMeta>, // lspconfig server name
+}
+
+struct MasonRegistry { packages: Vec<MasonPackage> }
+```
+
+`MasonRegistry` provides query methods: `by_category()`, `by_language()`, `search()`, `find_by_name()`.
+
+**`mason_registry/fetch.rs`** — Fetches `registry.json.zip` from the latest [GitHub Release](https://github.com/mason-org/mason-registry/releases), extracts and parses it, and caches the result to `mason_registry_cache.json` next to the executable. Uses the existing `reqwest` client and `zip` crate.
+
 ### `tui/` — Terminal User Interface
 
 Built with `ratatui` (rendering) and `crossterm` (terminal events).
 
-**`app.rs`** — State machine with four screens:
+**`app.rs`** — State machine with seven screens:
 
 ```
 InstanceList ──Enter──▶ InstanceDetail
@@ -208,13 +252,24 @@ EditFeatures            EditFeatures
      │ Esc                   │ Esc
      ▼                       ▼
 InstanceList            InstanceDetail
+
+InstanceList/Detail ──d──▶ ConfirmDelete ──y──▶ InstanceList
+                                         ──n──▶ Back
+
+InstanceList ──s──▶ EditSettings ──Esc──▶ InstanceList
 ```
 
-The `App` struct holds all state: instance list, selection cursor, current screen, hierarchical workload/feature checkbox state, workload registry, and global settings.
+The `App` struct holds all state: instance list, selection cursor, current screen, hierarchical workload/feature checkbox state, workload registry, global settings, instance search filter, settings editor state, and tutorial browsing state.
 
-The EditFeatures screen shows workloads as expandable groups. Pressing space toggles a workload (all features), right/l expands to show individual features, and left/h collapses.
+The EditFeatures screen shows workloads as expandable groups with dependency annotations (e.g., "[requires: LSP]" and "[needed by: Python, Node]"). Pressing space toggles a workload (all features), right/l expands to show individual features, and left/h collapses.
 
-Operations that need the terminal (launch, update, delete, font install) temporarily leave the alternate screen, run in the normal terminal, then re-enter the TUI.
+The instance list supports search/filter via `/` — type to filter by name, version, or workloads.
+
+Delete operations route through a confirmation dialog (ConfirmDelete screen) — press `y` to confirm, `n`/Esc to cancel.
+
+The EditSettings screen allows editing global settings (instances directory, default leader key, confirm-destructive toggle) with immediate save to `settings.json`.
+
+Operations that need the terminal (launch, update, font install) temporarily leave the alternate screen, run in the normal terminal, then re-enter the TUI. Update delegates to `instance::update()` for consistency with CLI behavior.
 
 **`ui.rs`** — Pure rendering functions. Each screen has a dedicated `draw_*` function that builds ratatui widgets (tables, paragraphs, styled text) and renders them to the frame.
 

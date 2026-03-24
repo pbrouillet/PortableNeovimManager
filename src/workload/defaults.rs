@@ -1,281 +1,8 @@
-use std::path::{Path, PathBuf};
-
-use serde::{Deserialize, Serialize};
+use super::model::{Feature, Preset, Tutorial, Workload, WorkloadRegistry};
 
 // ---------------------------------------------------------------------------
-// Feature — an individual toggleable unit within a workload
+// Built-in defaults
 // ---------------------------------------------------------------------------
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Feature {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub plugins: Vec<String>,
-    #[serde(default)]
-    pub config_lua: Option<String>,
-    /// Whether this feature is on by default when its parent workload is enabled.
-    #[serde(default = "default_true")]
-    pub default_enabled: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Preset — a named set of workloads for quick bulk-enable
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Preset {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub workloads: Vec<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Workload
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Workload {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub base: bool,
-    pub depends_on: Vec<String>,
-    /// Features within this workload (new format).
-    #[serde(default)]
-    pub features: Vec<Feature>,
-    /// DEPRECATED — kept for backward compat with old workloads.json.
-    /// Use `features` instead. Auto-migrated on load via `normalize()`.
-    #[serde(default, skip_serializing)]
-    pub plugins: Vec<String>,
-    /// DEPRECATED — kept for backward compat with old workloads.json.
-    #[serde(default, skip_serializing)]
-    pub config_lua: Option<String>,
-    pub cli_aliases: Vec<String>,
-    #[serde(default)]
-    pub tutorial: Option<String>,
-}
-
-impl Workload {
-    /// Migrate old-format workloads (plugins/config_lua on Workload) to the
-    /// new feature-based format.  No-op if features are already populated.
-    pub fn normalize(&mut self) {
-        if self.features.is_empty() && !self.plugins.is_empty() {
-            self.features = vec![Feature {
-                id: self.id.to_lowercase(),
-                name: self.name.clone(),
-                description: self.description.clone(),
-                plugins: std::mem::take(&mut self.plugins),
-                config_lua: self.config_lua.take(),
-                default_enabled: true,
-            }];
-        }
-    }
-
-    /// Collect all plugin specs from all features.
-    pub fn all_plugins(&self) -> Vec<String> {
-        self.features
-            .iter()
-            .flat_map(|f| f.plugins.iter().cloned())
-            .collect()
-    }
-
-    /// Collect all config_lua blocks from all features.
-    pub fn all_config_lua(&self) -> Vec<String> {
-        self.features
-            .iter()
-            .filter_map(|f| f.config_lua.clone())
-            .collect()
-    }
-
-    /// Find a feature by its id within this workload.
-    pub fn find_feature(&self, feature_id: &str) -> Option<&Feature> {
-        self.features.iter().find(|f| f.id == feature_id)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tutorial
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Tutorial {
-    pub id: String,
-    pub title: String,
-    pub content: String,
-}
-
-// ---------------------------------------------------------------------------
-// WorkloadRegistry
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct WorkloadRegistry {
-    pub workloads: Vec<Workload>,
-    #[serde(default)]
-    pub presets: Vec<Preset>,
-    #[serde(default)]
-    pub tutorials: Vec<Tutorial>,
-}
-
-impl WorkloadRegistry {
-    /// Normalize all workloads (migrate old format if needed).
-    pub fn normalize(&mut self) {
-        for w in &mut self.workloads {
-            w.normalize();
-        }
-    }
-
-    pub fn all(&self) -> &[Workload] {
-        &self.workloads
-    }
-
-    pub fn base(&self) -> Vec<&Workload> {
-        self.workloads.iter().filter(|w| w.base).collect()
-    }
-
-    pub fn optional(&self) -> Vec<&Workload> {
-        self.workloads.iter().filter(|w| !w.base).collect()
-    }
-
-    pub fn find_by_id(&self, id: &str) -> Option<&Workload> {
-        self.workloads.iter().find(|w| w.id == id)
-    }
-
-    pub fn find_by_alias(&self, alias: &str) -> Option<&Workload> {
-        let lower = alias.to_lowercase();
-        self.workloads
-            .iter()
-            .find(|w| w.cli_aliases.iter().any(|a| a.to_lowercase() == lower))
-    }
-
-    /// Returns IDs of workloads that depend on the given workload ID.
-    pub fn dependents_of(&self, id: &str) -> Vec<String> {
-        self.workloads
-            .iter()
-            .filter(|w| w.depends_on.iter().any(|dep| dep == id))
-            .map(|w| w.id.clone())
-            .collect()
-    }
-
-    /// Find a general tutorial by its id.
-    pub fn find_tutorial_by_id(&self, id: &str) -> Option<&Tutorial> {
-        let lower = id.to_lowercase();
-        self.tutorials.iter().find(|t| t.id.to_lowercase() == lower)
-    }
-
-    /// Returns a combined list of all tutorial topics: general tutorials first,
-    /// then workloads that have a tutorial.  Each entry is (id, title).
-    pub fn all_tutorial_topics(&self) -> Vec<(String, String)> {
-        let mut topics: Vec<(String, String)> = self
-            .tutorials
-            .iter()
-            .map(|t| (t.id.clone(), t.title.clone()))
-            .collect();
-        for w in &self.workloads {
-            if w.tutorial.is_some() {
-                topics.push((w.id.clone(), format!("{} — {}", w.name, w.description)));
-            }
-        }
-        topics
-    }
-
-    /// Look up tutorial content by topic id.  Checks general tutorials first,
-    /// then workload ids, then workload aliases.
-    pub fn tutorial_content(&self, topic: &str) -> Option<(String, String)> {
-        // General tutorials
-        if let Some(t) = self.find_tutorial_by_id(topic) {
-            return Some((t.title.clone(), t.content.clone()));
-        }
-        // Workload by id
-        if let Some(w) = self.find_by_id(topic) {
-            if let Some(ref content) = w.tutorial {
-                return Some((w.name.clone(), content.clone()));
-            }
-        }
-        // Workload by alias
-        if let Some(w) = self.find_by_alias(topic) {
-            if let Some(ref content) = w.tutorial {
-                return Some((w.name.clone(), content.clone()));
-            }
-        }
-        None
-    }
-
-    /// Find a preset by its id.
-    pub fn find_preset(&self, id: &str) -> Option<&Preset> {
-        let lower = id.to_lowercase();
-        self.presets.iter().find(|p| p.id.to_lowercase() == lower)
-    }
-
-    /// Resolve a "WorkloadId/FeatureId" path to the workload and feature.
-    pub fn find_feature_by_path(&self, path: &str) -> Option<(&Workload, &Feature)> {
-        let parts: Vec<&str> = path.splitn(2, '/').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-        let workload = self.find_by_id(parts[0])?;
-        let feature = workload.find_feature(parts[1])?;
-        Some((workload, feature))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Loading
-// ---------------------------------------------------------------------------
-
-/// Returns the path to workloads.json next to the executable.
-pub fn workloads_json_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("workloads.json")
-}
-
-/// Loads the workload registry. If workloads.json doesn't exist, generates it
-/// from built-in defaults first.
-pub fn load_workloads() -> WorkloadRegistry {
-    let path = workloads_json_path();
-    if !path.exists() {
-        let registry = default_registry();
-        if let Err(e) = write_workloads_file(&path, &registry) {
-            eprintln!("Warning: could not write default workloads.json: {e}");
-        }
-        return registry;
-    }
-    match load_workloads_from(&path) {
-        Ok(registry) => registry,
-        Err(e) => {
-            eprintln!(
-                "Warning: failed to load {}: {e}. Using built-in defaults.",
-                path.display()
-            );
-            default_registry()
-        }
-    }
-}
-
-fn load_workloads_from(path: &Path) -> Result<WorkloadRegistry, Box<dyn std::error::Error>> {
-    let data = std::fs::read_to_string(path)?;
-    let mut registry: WorkloadRegistry = serde_json::from_str(&data)?;
-    registry.normalize();
-    Ok(registry)
-}
-
-fn write_workloads_file(
-    path: &Path,
-    registry: &WorkloadRegistry,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let json = serde_json::to_string_pretty(registry)?;
-    std::fs::write(path, json)?;
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Built-in defaults
@@ -359,6 +86,7 @@ Troubleshooting
 - :LspLog shows the LSP log file
 - :LspInfo shows which servers are attached
 - If a server doesn't attach, check :Mason to confirm it's installed"#.into()),
+            category: Some("Languages".into()),
         },
         Workload {
             id: "Dap".into(),
@@ -445,6 +173,7 @@ Workflow
 3. Start debugging with :DapContinue
 4. The DAP UI opens automatically showing variables, call stack, etc.
 5. Step through code, inspect values, evaluate expressions in the REPL"#.into()),
+            category: None,
         },
         Workload {
             id: "TreeView".into(),
@@ -567,6 +296,7 @@ Tips
 - The tree follows your current file automatically
 - Git-ignored files are hidden by default
 - Install a Nerd Font (press n in pnm TUI) for file type icons"#.into()),
+            category: None,
         },
         Workload {
             id: "Tabs".into(),
@@ -641,6 +371,7 @@ Integration with TreeView
 -------------------------
 When TreeView is also enabled, the tab bar offsets itself to align
 with the explorer panel, showing "Explorer" above the tree."#.into()),
+            category: None,
         },
         Workload {
             id: "Telescope".into(),
@@ -695,6 +426,7 @@ Tips
   project.  Type a few characters and results filter in real time.
 - File finder (<leader>ff) respects .gitignore by default.
 - For best performance, install ripgrep (rg) and fd on your system."#.into()),
+            category: None,
         },
         Workload {
             id: "Treesitter".into(),
@@ -748,6 +480,7 @@ Note
 Parsers are compiled natively, so a C compiler is required on your
 system (gcc, clang, or MSVC on Windows).  Most systems have one
 already."#.into()),
+            category: None,
         },
         Workload {
             id: "OmniSharp".into(),
@@ -835,6 +568,7 @@ Key LSP commands for C#
   gr          Find references
   K           Hover documentation
   :LspInfo    Verify OmniSharp is attached"#.into()),
+            category: Some("Languages".into()),
         },
         Workload {
             id: "Node".into(),
@@ -936,6 +670,7 @@ Key LSP commands
   K           Hover documentation
   :TSToolsOrganizeImports    Organize imports
   :TSToolsRenameFile         Rename file and update imports"#.into()),
+            category: Some("Languages".into()),
         },
         Workload {
             id: "Python".into(),
@@ -1045,6 +780,7 @@ Key LSP commands
   gr          Find references
   K           Hover type information
   :LspInfo    Verify pyright is attached"#.into()),
+            category: Some("Languages".into()),
         },
         // -----------------------------------------------------------------
         // New IDE workloads
@@ -1132,6 +868,7 @@ Tips
 - Use :Gitsigns diffthis to see a full diff split
 - Use :Gitsigns blame to see the full buffer blame view
 - Gitsigns integrates with lualine to show git branch and diff stats"#.into()),
+            category: None,
         },
         Workload {
             id: "Completion".into(),
@@ -1196,6 +933,7 @@ Tips
 - Completion is async and updates on every keystroke
 - Fuzzy matching handles typos (e.g. typing "fnctin" matches "function")
 - Use :checkhealth blink.cmp to diagnose issues"#.into()),
+            category: None,
         },
         Workload {
             id: "Formatting".into(),
@@ -1294,6 +1032,7 @@ Tips
 - Format-on-save has a 500ms timeout to keep saves fast
 - Range formatting works: select lines in visual mode, then <leader>cf
 - Linting runs on save and when leaving insert mode"#.into()),
+            category: None,
         },
         Workload {
             id: "Testing".into(),
@@ -1373,6 +1112,7 @@ Tips
 - Neotest integrates with DAP for debugging tests
 - Use :Neotest run {strategy = "dap"} to debug a test
 - The summary panel shows the full test tree"#.into()),
+            category: None,
         },
         Workload {
             id: "Editing".into(),
@@ -1466,6 +1206,7 @@ Toggle comments easily:
   gcc      Toggle comment on current line
   gc{motion}  Toggle comment on motion (e.g. gcap for paragraph)
   gc       Toggle comment on selection (visual mode)"#.into()),
+            category: None,
         },
         Workload {
             id: "Statusline".into(),
@@ -1536,6 +1277,7 @@ Tips
 - It shows LSP diagnostics count (errors, warnings)
 - Git integration requires the Git workload (gitsigns)
 - Install a Nerd Font for proper icon display (pnm install-font)"#.into()),
+            category: None,
         },
         Workload {
             id: "AI".into(),
@@ -1612,6 +1354,7 @@ Tips
 - Chat has tool calling: it can read files and search your workspace
 - Select specific code before chatting for better context
 - Use :CopilotChatCommit to generate commit messages"#.into()),
+            category: None,
         },
     ]
 }
@@ -1790,216 +1533,4 @@ Managing instances
   pnm tui                   Interactive management UI"#.into(),
         },
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_registry_has_all_workloads() {
-        let reg = default_registry();
-        assert_eq!(reg.all().len(), 16);
-    }
-
-    #[test]
-    fn test_base_workloads() {
-        let reg = default_registry();
-        let base: Vec<&str> = reg.base().iter().map(|w| w.id.as_str()).collect();
-        assert!(base.contains(&"Telescope"));
-        assert!(base.contains(&"Treesitter"));
-        assert_eq!(base.len(), 2);
-    }
-
-    #[test]
-    fn test_optional_workloads() {
-        let reg = default_registry();
-        let optional: Vec<&str> = reg.optional().iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(optional.len(), 14);
-        assert!(!optional.contains(&"Telescope"));
-        assert!(!optional.contains(&"Treesitter"));
-    }
-
-    #[test]
-    fn test_find_by_id() {
-        let reg = default_registry();
-        let lsp = reg.find_by_id("Lsp").unwrap();
-        assert_eq!(lsp.name, "LSP");
-    }
-
-    #[test]
-    fn test_find_by_alias() {
-        let reg = default_registry();
-        assert_eq!(reg.find_by_alias("ts").unwrap().id, "Node");
-        assert_eq!(reg.find_by_alias("py").unwrap().id, "Python");
-        assert_eq!(reg.find_by_alias("tree").unwrap().id, "TreeView");
-        assert_eq!(reg.find_by_alias("csharp").unwrap().id, "OmniSharp");
-    }
-
-    #[test]
-    fn test_dependents_of() {
-        let reg = default_registry();
-        let dependents = reg.dependents_of("Lsp");
-        assert!(dependents.contains(&"OmniSharp".to_string()));
-        assert!(dependents.contains(&"Node".to_string()));
-        assert!(dependents.contains(&"Python".to_string()));
-    }
-
-    #[test]
-    fn test_json_round_trip() {
-        let reg = default_registry();
-        let json = serde_json::to_string_pretty(&reg).unwrap();
-        let loaded: WorkloadRegistry = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.workloads.len(), reg.workloads.len());
-        for (a, b) in reg.workloads.iter().zip(loaded.workloads.iter()) {
-            assert_eq!(a.id, b.id);
-            assert_eq!(a.features.len(), b.features.len());
-        }
-        assert_eq!(loaded.tutorials.len(), reg.tutorials.len());
-    }
-
-    #[test]
-    fn test_backward_compat_no_tutorial_fields() {
-        let json = r#"{
-            "workloads": [{
-                "id": "Lsp",
-                "name": "LSP",
-                "description": "test",
-                "base": false,
-                "depends_on": [],
-                "plugins": [],
-                "config_lua": null,
-                "cli_aliases": ["lsp"]
-            }]
-        }"#;
-        let reg: WorkloadRegistry = serde_json::from_str(json).unwrap();
-        assert_eq!(reg.workloads.len(), 1);
-        assert!(reg.workloads[0].tutorial.is_none());
-        assert!(reg.tutorials.is_empty());
-    }
-
-    #[test]
-    fn test_all_workloads_have_tutorials() {
-        let reg = default_registry();
-        for w in reg.all() {
-            assert!(
-                w.tutorial.is_some(),
-                "Workload '{}' is missing a tutorial",
-                w.id
-            );
-        }
-    }
-
-    #[test]
-    fn test_default_general_tutorials() {
-        let reg = default_registry();
-        assert!(reg.tutorials.len() >= 2);
-        assert!(reg.find_tutorial_by_id("leader-key").is_some());
-        assert!(reg.find_tutorial_by_id("getting-started").is_some());
-    }
-
-    #[test]
-    fn test_all_tutorial_topics() {
-        let reg = default_registry();
-        let topics = reg.all_tutorial_topics();
-        // 2 general + 9 workloads = 11
-        assert_eq!(topics.len(), 18);
-    }
-
-    #[test]
-    fn test_tutorial_content_by_id() {
-        let reg = default_registry();
-        let (title, content) = reg.tutorial_content("leader-key").unwrap();
-        assert_eq!(title, "Understanding the Leader Key");
-        assert!(!content.is_empty());
-    }
-
-    #[test]
-    fn test_tutorial_content_by_workload_id() {
-        let reg = default_registry();
-        let (title, content) = reg.tutorial_content("Python").unwrap();
-        assert_eq!(title, "Python");
-        assert!(content.contains("pyright"));
-    }
-
-    #[test]
-    fn test_tutorial_content_by_alias() {
-        let reg = default_registry();
-        let (title, _) = reg.tutorial_content("py").unwrap();
-        assert_eq!(title, "Python");
-        let (title, _) = reg.tutorial_content("cs").unwrap();
-        assert_eq!(title, "OmniSharp");
-        let (title, _) = reg.tutorial_content("ts").unwrap();
-        assert_eq!(title, "Node");
-    }
-
-    #[test]
-    fn test_tutorial_content_unknown_returns_none() {
-        let reg = default_registry();
-        assert!(reg.tutorial_content("nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_all_workloads_have_features() {
-        let reg = default_registry();
-        for w in reg.all() {
-            assert!(
-                !w.features.is_empty(),
-                "Workload '{}' has no features",
-                w.id
-            );
-        }
-    }
-
-    #[test]
-    fn test_workload_all_plugins_via_features() {
-        let reg = default_registry();
-        let lsp = reg.find_by_id("Lsp").unwrap();
-        let plugins = lsp.all_plugins();
-        assert!(!plugins.is_empty());
-        assert!(plugins.iter().any(|p| p.contains("nvim-lspconfig")));
-    }
-
-    #[test]
-    fn test_find_feature_by_path() {
-        let reg = default_registry();
-        let (w, f) = reg.find_feature_by_path("Lsp/lspconfig").unwrap();
-        assert_eq!(w.id, "Lsp");
-        assert_eq!(f.id, "lspconfig");
-        assert!(reg.find_feature_by_path("Nonexistent/foo").is_none());
-    }
-
-    #[test]
-    fn test_normalize_migrates_old_format() {
-        let json = r#"{
-            "workloads": [{
-                "id": "Old",
-                "name": "Old",
-                "description": "test",
-                "base": false,
-                "depends_on": [],
-                "plugins": ["{ \"some/plugin\" }"],
-                "config_lua": "vim.g.test = true",
-                "cli_aliases": ["old"]
-            }]
-        }"#;
-        let mut reg: WorkloadRegistry = serde_json::from_str(json).unwrap();
-        reg.normalize();
-        let w = &reg.workloads[0];
-        assert_eq!(w.features.len(), 1);
-        assert_eq!(w.features[0].id, "old");
-        assert_eq!(w.features[0].plugins.len(), 1);
-        assert!(w.features[0].config_lua.is_some());
-        // Old fields should be emptied after migration
-        assert!(w.plugins.is_empty());
-        assert!(w.config_lua.is_none());
-    }
-
-    #[test]
-    fn test_presets_exist() {
-        let reg = default_registry();
-        assert!(reg.find_preset("minimal").is_some());
-        assert!(reg.find_preset("ide-core").is_some());
-        assert!(reg.find_preset("ide-full").is_some());
-    }
 }

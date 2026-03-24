@@ -60,6 +60,9 @@ pub struct InstanceManifest {
     /// Individual features to enable even when their parent workload is off.
     #[serde(default)]
     pub extra_features: Vec<String>,
+    /// Mason packages to auto-install (e.g. ["pyright", "rust-analyzer", "debugpy"]).
+    #[serde(default)]
+    pub mason_packages: Vec<String>,
     #[serde(default = "default_leader_key")]
     pub leader_key: String,
     pub created_at: DateTime<Utc>,
@@ -75,6 +78,7 @@ impl InstanceManifest {
             workloads,
             disabled_features: vec![],
             extra_features: vec![],
+            mason_packages: vec![],
             leader_key: default_leader_key(),
             created_at: now,
             updated_at: now,
@@ -109,6 +113,10 @@ fn default_instances_dir() -> PathBuf {
         .join("instances")
 }
 
+fn default_confirm_destructive() -> bool {
+    true
+}
+
 /// Global application settings loaded from `settings.json` next to the
 /// executable.  Every field uses `#[serde(default)]` so new fields can be
 /// added without breaking existing files.
@@ -116,12 +124,24 @@ fn default_instances_dir() -> PathBuf {
 pub struct GlobalSettings {
     #[serde(default = "default_instances_dir")]
     pub instances_dir: PathBuf,
+    /// Default Neovim version for new instances (None = latest stable).
+    #[serde(default)]
+    pub default_version: Option<String>,
+    /// Default leader key for new instances.
+    #[serde(default = "default_leader_key")]
+    pub default_leader_key: String,
+    /// Require confirmation for destructive actions (delete/update).
+    #[serde(default = "default_confirm_destructive")]
+    pub confirm_destructive: bool,
 }
 
 impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
             instances_dir: default_instances_dir(),
+            default_version: None,
+            default_leader_key: default_leader_key(),
+            confirm_destructive: true,
         }
     }
 }
@@ -336,6 +356,7 @@ mod tests {
 
         let settings = GlobalSettings {
             instances_dir: tmp.join("my_instances"),
+            ..Default::default()
         };
         let path = tmp.join("settings.json");
         let json = serde_json::to_string_pretty(&settings).unwrap();
@@ -359,6 +380,7 @@ mod tests {
     fn test_instances_dir_uses_settings() {
         let settings = GlobalSettings {
             instances_dir: PathBuf::from("/custom/path"),
+            ..Default::default()
         };
         assert_eq!(instances_dir(&settings), PathBuf::from("/custom/path"));
         assert_eq!(
