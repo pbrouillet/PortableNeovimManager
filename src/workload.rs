@@ -1046,6 +1046,573 @@ Key LSP commands
   K           Hover type information
   :LspInfo    Verify pyright is attached"#.into()),
         },
+        // -----------------------------------------------------------------
+        // New IDE workloads
+        // -----------------------------------------------------------------
+        Workload {
+            id: "Git".into(),
+            name: "Git".into(),
+            description: "Git integration (gitsigns)".into(),
+            base: false,
+            depends_on: vec![],
+            features: vec![
+                Feature {
+                    id: "gitsigns".into(),
+                    name: "Gitsigns".into(),
+                    description: "Git signs in the gutter, hunk actions, blame".into(),
+                    plugins: vec![
+                        r#"{ "lewis6991/gitsigns.nvim" }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Git (gitsigns)
+require("gitsigns").setup({
+  on_attach = function(bufnr)
+    local gs = require("gitsigns")
+    local function map(mode, l, r, opts)
+      opts = opts or {}
+      opts.buffer = bufnr
+      vim.keymap.set(mode, l, r, opts)
+    end
+    -- Hunk navigation
+    map("n", "]c", function()
+      if vim.wo.diff then vim.cmd.normal({ "]c", bang = true }) else gs.nav_hunk("next") end
+    end, { desc = "Next hunk" })
+    map("n", "[c", function()
+      if vim.wo.diff then vim.cmd.normal({ "[c", bang = true }) else gs.nav_hunk("prev") end
+    end, { desc = "Prev hunk" })
+    -- Actions
+    map("n", "<leader>hs", gs.stage_hunk, { desc = "Stage hunk" })
+    map("n", "<leader>hr", gs.reset_hunk, { desc = "Reset hunk" })
+    map("v", "<leader>hs", function() gs.stage_hunk({ vim.fn.line("."), vim.fn.line("v") }) end, { desc = "Stage hunk" })
+    map("v", "<leader>hr", function() gs.reset_hunk({ vim.fn.line("."), vim.fn.line("v") }) end, { desc = "Reset hunk" })
+    map("n", "<leader>hS", gs.stage_buffer, { desc = "Stage buffer" })
+    map("n", "<leader>hR", gs.reset_buffer, { desc = "Reset buffer" })
+    map("n", "<leader>hp", gs.preview_hunk, { desc = "Preview hunk" })
+    map("n", "<leader>hb", function() gs.blame_line({ full = true }) end, { desc = "Blame line" })
+    map("n", "<leader>hd", gs.diffthis, { desc = "Diff this" })
+    map("n", "<leader>tb", gs.toggle_current_line_blame, { desc = "Toggle line blame" })
+  end,
+})"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
+            cli_aliases: vec!["git".into(), "gitsigns".into()],
+            tutorial: Some(r#"Git (Gitsigns)
+==============
+
+Gitsigns adds Git integration directly into your editor: signs in the
+gutter showing added/changed/deleted lines, hunk actions, and blame.
+
+Key commands
+------------
+  ]c / [c              Navigate between hunks
+  <leader>hs           Stage hunk (normal or visual)
+  <leader>hr           Reset hunk (normal or visual)
+  <leader>hS           Stage entire buffer
+  <leader>hR           Reset entire buffer
+  <leader>hp           Preview hunk in popup
+  <leader>hb           Blame current line (full commit info)
+  <leader>hd           Diff this file
+  <leader>tb           Toggle inline line blame
+
+Workflow
+--------
+1. Edit files in a git repository
+2. Signs appear automatically in the gutter:
+   ┃  Added line
+   ┃  Changed line
+   _  Deleted line
+3. Navigate hunks with ]c / [c
+4. Stage hunks with <leader>hs or stage all with <leader>hS
+5. Preview changes with <leader>hp before deciding
+
+Tips
+----
+- Use :Gitsigns diffthis to see a full diff split
+- Use :Gitsigns blame to see the full buffer blame view
+- Gitsigns integrates with lualine to show git branch and diff stats"#.into()),
+        },
+        Workload {
+            id: "Completion".into(),
+            name: "Completion".into(),
+            description: "Auto-completion (blink.cmp)".into(),
+            base: false,
+            depends_on: vec!["Lsp".into()],
+            features: vec![
+                Feature {
+                    id: "blink-cmp".into(),
+                    name: "Blink CMP".into(),
+                    description: "Fast, batteries-included completion with fuzzy matching".into(),
+                    plugins: vec![
+                        r#"{ "saghen/blink.cmp", version = "1.*", dependencies = { "rafamadriz/friendly-snippets" } }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Completion (blink.cmp)
+require("blink.cmp").setup({
+  keymap = { preset = "default" },
+  appearance = { nerd_font_variant = "mono" },
+  sources = { default = { "lsp", "path", "snippets", "buffer" } },
+  signature = { enabled = true },
+})"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
+            cli_aliases: vec!["completion".into(), "cmp".into(), "autocomplete".into()],
+            tutorial: Some(r#"Completion (blink.cmp)
+======================
+
+Blink.cmp provides IDE-style auto-completion: LSP suggestions, snippets,
+file paths, and buffer words — all with typo-resistant fuzzy matching.
+
+How it works
+------------
+Completion appears automatically as you type. Sources include:
+  - LSP     Language server completions (functions, variables, types)
+  - Snippets  Code templates from friendly-snippets
+  - Path    File system paths
+  - Buffer  Words from open buffers
+
+Key bindings (default keymap)
+-----------------------------
+  <C-space>       Trigger completion manually
+  <C-e>           Cancel/dismiss completion
+  <C-y> / <CR>    Accept selected item
+  <C-n> / <Down>  Next item
+  <C-p> / <Up>    Previous item
+  <Tab>           Snippet jump forward
+  <S-Tab>         Snippet jump backward
+
+Signature help appears automatically when typing function arguments.
+
+Prerequisites
+-------------
+  - The Lsp workload must be enabled (auto-enabled as dependency)
+  - A language server must be installed via :Mason
+
+Tips
+----
+- Completion is async and updates on every keystroke
+- Fuzzy matching handles typos (e.g. typing "fnctin" matches "function")
+- Use :checkhealth blink.cmp to diagnose issues"#.into()),
+        },
+        Workload {
+            id: "Formatting".into(),
+            name: "Formatting".into(),
+            description: "Code formatting and linting (conform + nvim-lint)".into(),
+            base: false,
+            depends_on: vec!["Lsp".into()],
+            features: vec![
+                Feature {
+                    id: "conform".into(),
+                    name: "Conform".into(),
+                    description: "Lightweight code formatter with format-on-save".into(),
+                    plugins: vec![
+                        r#"{ "stevearc/conform.nvim" }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Formatting (conform.nvim)
+require("conform").setup({
+  format_on_save = {
+    timeout_ms = 500,
+    lsp_format = "fallback",
+  },
+})
+vim.keymap.set({ "n", "v" }, "<leader>cf", function()
+  require("conform").format({ async = true, lsp_format = "fallback" })
+end, { desc = "Format buffer/selection" })"#.into()),
+                    default_enabled: true,
+                },
+                Feature {
+                    id: "nvim-lint".into(),
+                    name: "Nvim Lint".into(),
+                    description: "Async linter complementing LSP diagnostics".into(),
+                    plugins: vec![
+                        r#"{ "mfussenegger/nvim-lint" }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Linting (nvim-lint)
+vim.api.nvim_create_autocmd({ "BufWritePost", "InsertLeave" }, {
+  callback = function()
+    require("lint").try_lint()
+  end,
+})"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
+            cli_aliases: vec!["formatting".into(), "format".into(), "lint".into(), "linting".into()],
+            tutorial: Some(r#"Formatting & Linting
+====================
+
+This workload provides two complementary tools:
+
+  - conform.nvim   Format code on save (or manually)
+  - nvim-lint       Async linting beyond what LSP provides
+
+Format on Save
+--------------
+Files are automatically formatted when you save (:w). The formatter
+tries your configured formatter first, falling back to LSP formatting.
+
+Manual formatting: <leader>cf (works in normal and visual mode)
+
+Setting up formatters
+---------------------
+Add formatter configuration to your user.lua:
+
+  require("conform").setup({
+    formatters_by_ft = {
+      lua = { "stylua" },
+      python = { "isort", "black" },
+      javascript = { "prettierd", "prettier", stop_after_first = true },
+      rust = { "rustfmt", lsp_format = "fallback" },
+    },
+  })
+
+Install formatters via :Mason or your system package manager.
+
+Setting up linters
+------------------
+Add linter configuration to your user.lua:
+
+  require("lint").linters_by_ft = {
+    python = { "ruff" },
+    javascript = { "eslint" },
+    markdown = { "vale" },
+  }
+
+Install linters via :Mason or your system package manager.
+
+Commands
+--------
+  :ConformInfo     Show configured formatters and log
+  <leader>cf       Format buffer or selection
+
+Tips
+----
+- Format-on-save has a 500ms timeout to keep saves fast
+- Range formatting works: select lines in visual mode, then <leader>cf
+- Linting runs on save and when leaving insert mode"#.into()),
+        },
+        Workload {
+            id: "Testing".into(),
+            name: "Testing".into(),
+            description: "Test runner framework (neotest)".into(),
+            base: false,
+            depends_on: vec!["Treesitter".into()],
+            features: vec![
+                Feature {
+                    id: "neotest".into(),
+                    name: "Neotest".into(),
+                    description: "Run and debug tests with 35+ language adapters".into(),
+                    plugins: vec![
+                        r#"{ "nvim-neotest/neotest", dependencies = { "nvim-neotest/nvim-nio", "nvim-lua/plenary.nvim", "antoinemadec/FixCursorHold.nvim", "nvim-treesitter/nvim-treesitter" } }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Testing (neotest)
+require("neotest").setup({
+  -- Add adapters in your user.lua, e.g.:
+  -- adapters = { require("neotest-python"), require("neotest-jest") }
+})
+vim.keymap.set("n", "<leader>tt", function() require("neotest").run.run() end, { desc = "Run nearest test" })
+vim.keymap.set("n", "<leader>tf", function() require("neotest").run.run(vim.fn.expand("%")) end, { desc = "Run file tests" })
+vim.keymap.set("n", "<leader>ts", function() require("neotest").summary.toggle() end, { desc = "Toggle test summary" })
+vim.keymap.set("n", "<leader>to", function() require("neotest").output.open({ enter_on_open = true }) end, { desc = "Show test output" })"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
+            cli_aliases: vec!["testing".into(), "test".into(), "neotest".into()],
+            tutorial: Some(r#"Testing (Neotest)
+=================
+
+Neotest is a test runner framework — like VSCode's Test Explorer but
+inside Neovim. It supports 35+ language adapters.
+
+Key commands
+------------
+  <leader>tt    Run the nearest test
+  <leader>tf    Run all tests in the current file
+  <leader>ts    Toggle the test summary panel
+  <leader>to    Show output of the last test run
+
+Setting up test adapters
+------------------------
+Install the adapter for your language, then configure in user.lua:
+
+  -- Python (pytest/unittest)
+  require("neotest").setup({
+    adapters = {
+      require("neotest-python"),
+    },
+  })
+
+Popular adapters:
+  neotest-python     pytest, unittest
+  neotest-jest       Jest (JavaScript)
+  neotest-vitest     Vitest (JavaScript)
+  neotest-go         Go testing
+  neotest-rust       Rust (cargo test)
+  neotest-dotnet     .NET (xUnit, NUnit, MSTest)
+
+Install adapters as lazy.nvim plugins in your user.lua:
+  { "nvim-neotest/neotest-python" }
+  { "nvim-neotest/neotest-jest" }
+
+Workflow
+--------
+1. Open a test file
+2. Press <leader>tt to run the nearest test
+3. Press <leader>ts to see the summary panel
+4. Green ✓ for passing, red ✗ for failing
+5. Press <leader>to on a failed test to see the output
+
+Tips
+----
+- Neotest integrates with DAP for debugging tests
+- Use :Neotest run {strategy = "dap"} to debug a test
+- The summary panel shows the full test tree"#.into()),
+        },
+        Workload {
+            id: "Editing".into(),
+            name: "Editing".into(),
+            description: "Editing conveniences (autopairs, surround, flash, comments)".into(),
+            base: false,
+            depends_on: vec![],
+            features: vec![
+                Feature {
+                    id: "autopairs".into(),
+                    name: "Auto Pairs".into(),
+                    description: "Automatically close brackets, quotes, etc.".into(),
+                    plugins: vec![
+                        r#"{ "windwp/nvim-autopairs", event = "InsertEnter", config = true }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
+                Feature {
+                    id: "surround".into(),
+                    name: "Surround".into(),
+                    description: "Add/change/delete surrounding pairs".into(),
+                    plugins: vec![
+                        r#"{ "kylechui/nvim-surround", version = "^4.0.0", event = "VeryLazy", config = true }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
+                Feature {
+                    id: "flash".into(),
+                    name: "Flash".into(),
+                    description: "Lightning-fast navigation with search labels".into(),
+                    plugins: vec![
+                        r#"{ "folke/flash.nvim", event = "VeryLazy" }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Editing (flash.nvim)
+vim.keymap.set({ "n", "x", "o" }, "s", function() require("flash").jump() end, { desc = "Flash jump" })
+vim.keymap.set({ "n", "x", "o" }, "S", function() require("flash").treesitter() end, { desc = "Flash Treesitter" })
+vim.keymap.set("o", "r", function() require("flash").remote() end, { desc = "Remote Flash" })"#.into()),
+                    default_enabled: true,
+                },
+                Feature {
+                    id: "comment".into(),
+                    name: "Comment".into(),
+                    description: "Toggle comments with gc/gcc".into(),
+                    plugins: vec![
+                        r#"{ "numToStr/Comment.nvim", event = "VeryLazy", config = true }"#.into(),
+                    ],
+                    config_lua: None,
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
+            cli_aliases: vec!["editing".into(), "edit".into(), "convenience".into()],
+            tutorial: Some(r#"Editing Conveniences
+====================
+
+This workload bundles four editing quality-of-life plugins:
+
+Auto Pairs
+----------
+Automatically closes brackets, quotes, and other pairs as you type.
+  Type (  →  get ()  with cursor between
+  Type {  →  get {}
+  Press Enter between {} →  properly indented block
+
+Surround (nvim-surround)
+------------------------
+Add, change, or delete surrounding characters:
+  ys{motion}{char}    Add surround     ysiw) → surround word with ()
+  ds{char}            Delete surround  ds]   → remove [ ]
+  cs{old}{new}        Change surround  cs'"  → change ' to "
+
+Examples:
+  Old text              Command    New text
+  surr*ound_words       ysiw)      (surround_words)
+  [delete ar*ound me!]  ds]        delete around me!
+  'change quot*es'      cs'"       "change quotes"
+
+Flash (flash.nvim)
+------------------
+Lightning-fast navigation using search labels:
+  s        Flash jump — type characters, then a label to jump
+  S        Flash Treesitter — select Treesitter nodes
+  r        Remote Flash (in operator-pending mode)
+
+Comment (Comment.nvim)
+----------------------
+Toggle comments easily:
+  gcc      Toggle comment on current line
+  gc{motion}  Toggle comment on motion (e.g. gcap for paragraph)
+  gc       Toggle comment on selection (visual mode)"#.into()),
+        },
+        Workload {
+            id: "Statusline".into(),
+            name: "Statusline".into(),
+            description: "Status line (lualine)".into(),
+            base: false,
+            depends_on: vec![],
+            features: vec![
+                Feature {
+                    id: "lualine".into(),
+                    name: "Lualine".into(),
+                    description: "Blazing fast statusline with mode, branch, diagnostics".into(),
+                    plugins: vec![
+                        r#"{ "nvim-lualine/lualine.nvim", dependencies = { "nvim-tree/nvim-web-devicons" } }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: Statusline (lualine)
+require("lualine").setup({
+  options = {
+    theme = "auto",
+    component_separators = { left = "", right = "" },
+    section_separators = { left = "", right = "" },
+  },
+})"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
+            cli_aliases: vec!["statusline".into(), "lualine".into(), "status".into()],
+            tutorial: Some(r#"Statusline (Lualine)
+====================
+
+Lualine adds a beautiful, informative status bar at the bottom of your
+editor — showing mode, git branch, diagnostics, file type, and position.
+
+Layout
+------
+  +-------------------------------------------------+
+  | A | B | C                             X | Y | Z |
+  +-------------------------------------------------+
+
+Default sections:
+  A  Current mode (NORMAL, INSERT, VISUAL, etc.)
+  B  Git branch + diff stats (if gitsigns is enabled)
+  C  File path
+  X  File encoding
+  Y  File type
+  Z  Cursor position (line:column)
+
+Customization
+-------------
+Add to your user.lua to customize sections:
+
+  require("lualine").setup({
+    sections = {
+      lualine_a = { "mode" },
+      lualine_b = { "branch", "diff", "diagnostics" },
+      lualine_c = { "filename" },
+      lualine_x = { "encoding", "fileformat", "filetype" },
+      lualine_y = { "progress" },
+      lualine_z = { "location" },
+    },
+  })
+
+Tips
+----
+- Lualine auto-detects your colorscheme
+- It shows LSP diagnostics count (errors, warnings)
+- Git integration requires the Git workload (gitsigns)
+- Install a Nerd Font for proper icon display (pnm install-font)"#.into()),
+        },
+        Workload {
+            id: "AI".into(),
+            name: "AI".into(),
+            description: "AI-assisted coding (GitHub Copilot Chat)".into(),
+            base: false,
+            depends_on: vec!["Lsp".into()],
+            features: vec![
+                Feature {
+                    id: "copilot-chat".into(),
+                    name: "Copilot Chat".into(),
+                    description: "GitHub Copilot Chat with tool calling and multi-model support".into(),
+                    plugins: vec![
+                        r#"{ "github/copilot.vim" }"#.into(),
+                        r#"{ "CopilotC-Nvim/CopilotChat.nvim", dependencies = { "github/copilot.vim", "nvim-lua/plenary.nvim" }, config = true }"#.into(),
+                    ],
+                    config_lua: Some(r#"-- Feature: AI (CopilotChat)
+vim.keymap.set({ "n", "v" }, "<leader>ac", "<cmd>CopilotChatToggle<cr>", { desc = "Toggle Copilot Chat" })
+vim.keymap.set({ "n", "v" }, "<leader>ae", "<cmd>CopilotChatExplain<cr>", { desc = "Explain code" })
+vim.keymap.set({ "n", "v" }, "<leader>ar", "<cmd>CopilotChatReview<cr>", { desc = "Review code" })
+vim.keymap.set({ "n", "v" }, "<leader>af", "<cmd>CopilotChatFix<cr>", { desc = "Fix code" })
+vim.keymap.set({ "n", "v" }, "<leader>ao", "<cmd>CopilotChatOptimize<cr>", { desc = "Optimize code" })
+vim.keymap.set({ "n", "v" }, "<leader>at", "<cmd>CopilotChatTests<cr>", { desc = "Generate tests" })"#.into()),
+                    default_enabled: true,
+                },
+            ],
+            plugins: vec![],
+            config_lua: None,
+            cli_aliases: vec!["ai".into(), "copilot".into(), "copilot-chat".into()],
+            tutorial: Some(r#"AI (GitHub Copilot Chat)
+========================
+
+This workload adds GitHub Copilot for inline completions and an
+interactive chat interface for code explanation, review, and generation.
+
+Prerequisites
+-------------
+  - A GitHub Copilot subscription (Individual, Business, or Enterprise)
+  - Copilot Chat enabled in your GitHub settings
+  - Run :Copilot auth on first launch to authenticate
+
+Inline completions (copilot.vim)
+--------------------------------
+Copilot suggests code as you type, shown as ghost text:
+  Tab            Accept the suggestion
+  <M-]>          Next suggestion
+  <M-[>          Previous suggestion
+  <C-]>          Dismiss suggestion
+
+Chat commands
+-------------
+  <leader>ac     Toggle Copilot Chat window
+  <leader>ae     Explain selected code
+  <leader>ar     Review selected code
+  <leader>af     Fix issues in selected code
+  <leader>ao     Optimize selected code
+  <leader>at     Generate tests for selected code
+
+Workflow
+--------
+1. Select code in visual mode
+2. Press <leader>ae to get an explanation
+3. Or press <leader>af to ask Copilot to fix issues
+4. Chat responses appear in a split window
+
+Supported models
+----------------
+Copilot Chat supports multiple AI models including GPT-4o, Claude,
+and Gemini. The available models depend on your GitHub Copilot settings.
+
+Tips
+----
+- Use :CopilotChat to start a free-form conversation
+- Chat has tool calling: it can read files and search your workspace
+- Select specific code before chatting for better context
+- Use :CopilotChatCommit to generate commit messages"#.into()),
+        },
     ]
 }
 
@@ -1060,14 +1627,23 @@ fn default_presets() -> Vec<Preset> {
         Preset {
             id: "ide-core".into(),
             name: "IDE Core".into(),
-            description: "LSP, tree view, tabs — essential IDE features".into(),
-            workloads: vec!["Lsp".into(), "TreeView".into(), "Tabs".into()],
+            description: "LSP, completion, git, tree view, tabs, editing, statusline".into(),
+            workloads: vec![
+                "Lsp".into(), "Completion".into(), "Git".into(),
+                "TreeView".into(), "Tabs".into(), "Editing".into(),
+                "Statusline".into(),
+            ],
         },
         Preset {
             id: "ide-full".into(),
             name: "IDE Full".into(),
-            description: "Full IDE: LSP, DAP, tree view, tabs".into(),
-            workloads: vec!["Lsp".into(), "Dap".into(), "TreeView".into(), "Tabs".into()],
+            description: "Full IDE: all features including formatting, testing, and AI".into(),
+            workloads: vec![
+                "Lsp".into(), "Dap".into(), "Completion".into(), "Git".into(),
+                "Formatting".into(), "Testing".into(), "TreeView".into(),
+                "Tabs".into(), "Editing".into(), "Statusline".into(),
+                "AI".into(),
+            ],
         },
     ]
 }
@@ -1223,7 +1799,7 @@ mod tests {
     #[test]
     fn test_default_registry_has_all_workloads() {
         let reg = default_registry();
-        assert_eq!(reg.all().len(), 9);
+        assert_eq!(reg.all().len(), 16);
     }
 
     #[test]
@@ -1239,7 +1815,7 @@ mod tests {
     fn test_optional_workloads() {
         let reg = default_registry();
         let optional: Vec<&str> = reg.optional().iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(optional.len(), 7);
+        assert_eq!(optional.len(), 14);
         assert!(!optional.contains(&"Telescope"));
         assert!(!optional.contains(&"Treesitter"));
     }
@@ -1327,7 +1903,7 @@ mod tests {
         let reg = default_registry();
         let topics = reg.all_tutorial_topics();
         // 2 general + 9 workloads = 11
-        assert_eq!(topics.len(), 11);
+        assert_eq!(topics.len(), 18);
     }
 
     #[test]

@@ -206,7 +206,7 @@ mod tests {
             .map(String::from)
             .collect();
         let result = parse_features(&input, &reg);
-        assert_eq!(result, vec!["Lsp", "TreeView", "Tabs"]);
+        assert_eq!(result, vec!["Lsp", "Completion", "Git", "TreeView", "Tabs", "Editing", "Statusline"]);
     }
 
     #[test]
@@ -228,6 +228,6 @@ mod tests {
             .map(String::from)
             .collect();
         let result = parse_features(&input, &reg);
-        assert_eq!(result, vec!["Lsp", "TreeView", "Tabs", "Python"]);
+        assert_eq!(result, vec!["Lsp", "Completion", "Git", "TreeView", "Tabs", "Editing", "Statusline", "Python"]);
     }
 }
