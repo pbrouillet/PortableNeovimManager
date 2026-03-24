@@ -975,7 +975,7 @@ fn draw_marketplace(frame: &mut Frame, app: &App, instance_name: &str) {
         Some(crate::mason_registry::MasonCategory::Dap) => 1,
         Some(crate::mason_registry::MasonCategory::Formatter) => 2,
         Some(crate::mason_registry::MasonCategory::Linter) => 3,
-        None => 4,
+        None | Some(_) => 4,
     };
 
     let mut tab_spans: Vec<Span> = Vec::new();

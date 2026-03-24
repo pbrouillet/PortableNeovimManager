@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Category enum for mason packages.
+/// Uses `other` to gracefully handle new categories added to the registry.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MasonCategory {
     #[serde(rename = "LSP")]
@@ -11,6 +12,8 @@ pub enum MasonCategory {
     Formatter,
     #[serde(rename = "Linter")]
     Linter,
+    #[serde(untagged)]
+    Other(String),
 }
 
 impl std::fmt::Display for MasonCategory {
@@ -20,6 +23,7 @@ impl std::fmt::Display for MasonCategory {
             Self::Dap => write!(f, "DAP"),
             Self::Formatter => write!(f, "Formatter"),
             Self::Linter => write!(f, "Linter"),
+            Self::Other(s) => write!(f, "{s}"),
         }
     }
 }

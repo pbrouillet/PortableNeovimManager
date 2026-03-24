@@ -1263,7 +1263,7 @@ async fn handle_marketplace_keys(app: &mut App, code: KeyCode, instance_name: &s
                 Some(MasonCategory::Dap) => Some(MasonCategory::Formatter),
                 Some(MasonCategory::Formatter) => Some(MasonCategory::Linter),
                 Some(MasonCategory::Linter) => None,
-                None => Some(MasonCategory::Lsp),
+                None | Some(_) => Some(MasonCategory::Lsp),
             };
             app.update_marketplace_filter();
         }
@@ -1274,7 +1274,7 @@ async fn handle_marketplace_keys(app: &mut App, code: KeyCode, instance_name: &s
                 Some(MasonCategory::Dap) => Some(MasonCategory::Lsp),
                 Some(MasonCategory::Formatter) => Some(MasonCategory::Dap),
                 Some(MasonCategory::Linter) => Some(MasonCategory::Formatter),
-                None => Some(MasonCategory::Linter),
+                None | Some(_) => Some(MasonCategory::Linter),
             };
             app.update_marketplace_filter();
         }
