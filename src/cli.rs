@@ -69,6 +69,11 @@ pub enum Commands {
     },
     /// Initialize a default settings.json next to the executable
     Init,
+    /// Show tutorials for features and workflows
+    Tutorial {
+        /// Topic to show (e.g. "leader-key", "python", "lsp"). Lists all if omitted.
+        topic: Option<String>,
+    },
     /// Open the interactive TUI
     Tui,
 }

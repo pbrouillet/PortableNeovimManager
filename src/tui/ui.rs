@@ -16,6 +16,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Screen::InstanceDetail { name } => draw_instance_detail(frame, app, name),
         Screen::EditFeatures { name } => draw_edit_features(frame, app, name),
         Screen::EditLeaderKey { name } => draw_edit_leader(frame, app, name),
+        Screen::TutorialList => draw_tutorial_list(frame, app),
+        Screen::TutorialView { title, content, .. } => draw_tutorial_view(frame, app, title, content),
     }
 }
 
@@ -121,7 +123,7 @@ fn draw_instance_list(frame: &mut Frame, app: &App) {
     // Footer
     let footer_idx = if has_message { 3 } else { 2 };
     let footer = Paragraph::new(Line::from(vec![Span::styled(
-        " q: Quit | Enter: Details | f: Features | m: Leader | o: Open Dir | n: Nerd Font | s: Settings | l: Launch | u: Update | d: Delete ",
+        " q: Quit | Enter: Details | t: Tutorials | f: Features | m: Leader | o: Open Dir | n: Nerd Font | s: Settings | l: Launch | u: Update | d: Delete ",
         Style::default().fg(Color::DarkGray),
     )]))
     .alignment(ratatui::layout::Alignment::Center)
@@ -321,7 +323,7 @@ fn draw_edit_features(frame: &mut Frame, app: &App, name: &str) {
     // Footer
     let footer_idx = if has_message { 3 } else { 2 };
     let footer = Paragraph::new(Line::from(vec![Span::styled(
-        " Space: Toggle | Enter: Apply & Save | Esc: Cancel ",
+        " Space: Toggle | t: Tutorial | Enter: Apply & Save | Esc: Cancel ",
         Style::default().fg(Color::DarkGray),
     )]))
     .alignment(ratatui::layout::Alignment::Center)
@@ -407,6 +409,142 @@ fn draw_edit_leader(frame: &mut Frame, app: &App, name: &str) {
     // Footer
     let footer = Paragraph::new(Line::from(vec![Span::styled(
         " Enter: Apply & Save | Esc: Cancel ",
+        Style::default().fg(Color::DarkGray),
+    )]))
+    .alignment(ratatui::layout::Alignment::Center)
+    .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(footer, chunks[2]);
+}
+
+// ── Tutorial List ───────────────────────────────────────────────────────────
+
+fn draw_tutorial_list(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    let chunks = Layout::vertical(vec![
+        Constraint::Length(3),
+        Constraint::Min(5),
+        Constraint::Length(3),
+    ])
+    .split(area);
+
+    // Header
+    let header = Paragraph::new(Line::from(vec![Span::styled(
+        " Tutorials ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(ratatui::layout::Alignment::Center)
+    .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(header, chunks[0]);
+
+    // Topic list
+    let rows: Vec<Row> = app
+        .tutorial_topics
+        .iter()
+        .enumerate()
+        .map(|(i, (id, title))| {
+            let style = if i == app.tutorial_cursor {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(id.as_str()),
+                Cell::from(title.as_str()),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let widths = [Constraint::Length(20), Constraint::Min(30)];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["TOPIC", "DESCRIPTION"])
+                .style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .bottom_margin(1),
+        )
+        .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(table, chunks[1]);
+
+    // Footer
+    let footer = Paragraph::new(Line::from(vec![Span::styled(
+        " j/k: Navigate | Enter: View | Esc: Back ",
+        Style::default().fg(Color::DarkGray),
+    )]))
+    .alignment(ratatui::layout::Alignment::Center)
+    .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(footer, chunks[2]);
+}
+
+// ── Tutorial View ───────────────────────────────────────────────────────────
+
+fn draw_tutorial_view(frame: &mut Frame, app: &App, title: &str, content: &str) {
+    let area = frame.area();
+
+    let chunks = Layout::vertical(vec![
+        Constraint::Length(3),
+        Constraint::Min(5),
+        Constraint::Length(3),
+    ])
+    .split(area);
+
+    // Header
+    let header = Paragraph::new(Line::from(vec![Span::styled(
+        format!(" {title} "),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(ratatui::layout::Alignment::Center)
+    .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(header, chunks[0]);
+
+    // Content with scroll
+    let lines: Vec<Line> = content
+        .lines()
+        .map(|line| {
+            if line.chars().all(|c| c == '=' || c == '-') && !line.is_empty() {
+                Line::from(Span::styled(line, Style::default().fg(Color::DarkGray)))
+            } else if line.starts_with("  ") && line.contains("  ") {
+                Line::from(Span::styled(line, Style::default().fg(Color::Green)))
+            } else {
+                Line::from(line)
+            }
+        })
+        .collect();
+
+    let total_lines = lines.len();
+    let visible_height = chunks[1].height.saturating_sub(2) as usize;
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll = app.tutorial_scroll.min(max_scroll);
+
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll as u16, 0))
+        .wrap(Wrap { trim: false })
+        .block(Block::new().borders(Borders::ALL));
+    frame.render_widget(paragraph, chunks[1]);
+
+    // Footer
+    let scroll_info = if total_lines > visible_height {
+        format!(
+            " j/k: Scroll | d/u: Page | g/G: Top/Bottom | Line {}/{} | Esc: Back ",
+            scroll + 1,
+            total_lines
+        )
+    } else {
+        " Esc: Back ".to_string()
+    };
+
+    let footer = Paragraph::new(Line::from(vec![Span::styled(
+        scroll_info,
         Style::default().fg(Color::DarkGray),
     )]))
     .alignment(ratatui::layout::Alignment::Center)

@@ -21,6 +21,8 @@ pub enum Screen {
     InstanceDetail { name: String },
     EditFeatures { name: String },
     EditLeaderKey { name: String },
+    TutorialList,
+    TutorialView { title: String, content: String },
 }
 
 // ── App state ───────────────────────────────────────────────────────────────
@@ -41,10 +43,17 @@ pub struct App {
     pub registry: WorkloadRegistry,
     /// Global application settings
     pub settings: GlobalSettings,
+    /// Cursor position in the tutorial list
+    pub tutorial_cursor: usize,
+    /// Cached tutorial topics list: (id, title)
+    pub tutorial_topics: Vec<(String, String)>,
+    /// Scroll offset for tutorial view
+    pub tutorial_scroll: usize,
 }
 
 impl App {
     fn new(instances: Vec<InstanceManifest>, registry: WorkloadRegistry, settings: GlobalSettings) -> Self {
+        let tutorial_topics = registry.all_tutorial_topics();
         Self {
             instances,
             selected: 0,
@@ -56,6 +65,9 @@ impl App {
             leader_cursor: 0,
             registry,
             settings,
+            tutorial_cursor: 0,
+            tutorial_topics,
+            tutorial_scroll: 0,
         }
     }
 
@@ -288,6 +300,12 @@ pub async fn run(settings: GlobalSettings) -> Result<(), Box<dyn std::error::Err
                         let name = name.clone();
                         handle_leader_keys(&mut app, key.code, &name);
                     }
+                    Screen::TutorialList => {
+                        handle_tutorial_list_keys(&mut app, key.code);
+                    }
+                    Screen::TutorialView { .. } => {
+                        handle_tutorial_view_keys(&mut app, key.code);
+                    }
                 }
             }
         }
@@ -375,6 +393,11 @@ async fn handle_list_keys(
         KeyCode::Char('s') => {
             do_init_settings(app);
         }
+        KeyCode::Char('t') => {
+            app.tutorial_cursor = 0;
+            app.screen = Screen::TutorialList;
+            app.message = None;
+        }
         _ => {}
     }
 }
@@ -447,6 +470,19 @@ fn handle_features_keys(app: &mut App, code: KeyCode, name: &str) {
                 name: name.to_string(),
             };
         }
+        KeyCode::Char('t') => {
+            if let Some((workload_id, _)) = app.feature_checkboxes.get(app.feature_cursor) {
+                if let Some((title, content)) = app.registry.tutorial_content(workload_id) {
+                    app.tutorial_scroll = 0;
+                    app.screen = Screen::TutorialView {
+                        title,
+                        content,
+                    };
+                } else {
+                    app.message = Some("No tutorial available for this feature.".to_string());
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -474,6 +510,70 @@ fn handle_leader_keys(app: &mut App, code: KeyCode, name: &str) {
             app.screen = Screen::InstanceDetail {
                 name: name.to_string(),
             };
+        }
+        _ => {}
+    }
+}
+
+fn handle_tutorial_list_keys(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::InstanceList;
+            app.message = None;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if !app.tutorial_topics.is_empty() {
+                app.tutorial_cursor = (app.tutorial_cursor + 1) % app.tutorial_topics.len();
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if !app.tutorial_topics.is_empty() {
+                app.tutorial_cursor = if app.tutorial_cursor == 0 {
+                    app.tutorial_topics.len() - 1
+                } else {
+                    app.tutorial_cursor - 1
+                };
+            }
+        }
+        KeyCode::Enter => {
+            if let Some((id, _)) = app.tutorial_topics.get(app.tutorial_cursor) {
+                if let Some((title, content)) = app.registry.tutorial_content(id) {
+                    app.tutorial_scroll = 0;
+                    app.screen = Screen::TutorialView {
+                        title,
+                        content,
+                    };
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_tutorial_view_keys(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::TutorialList;
+            app.message = None;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.tutorial_scroll = app.tutorial_scroll.saturating_add(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.tutorial_scroll = app.tutorial_scroll.saturating_sub(1);
+        }
+        KeyCode::PageDown | KeyCode::Char('d') => {
+            app.tutorial_scroll = app.tutorial_scroll.saturating_add(10);
+        }
+        KeyCode::PageUp | KeyCode::Char('u') => {
+            app.tutorial_scroll = app.tutorial_scroll.saturating_sub(10);
+        }
+        KeyCode::Home | KeyCode::Char('g') => {
+            app.tutorial_scroll = 0;
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            // Set to a large number; rendering will clamp
+            app.tutorial_scroll = usize::MAX;
         }
         _ => {}
     }

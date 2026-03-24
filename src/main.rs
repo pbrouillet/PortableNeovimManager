@@ -159,6 +159,36 @@ async fn main() {
                 }
             }
         }
+        Commands::Tutorial { topic } => {
+            match topic {
+                None => {
+                    let topics = registry.all_tutorial_topics();
+                    if topics.is_empty() {
+                        println!("No tutorials available.");
+                    } else {
+                        println!("Available tutorials:\n");
+                        for (id, title) in &topics {
+                            println!("  {:<20} {}", id, title);
+                        }
+                        println!("\nRun: pnm tutorial <topic>");
+                    }
+                    Ok(())
+                }
+                Some(ref topic_id) => {
+                    match registry.tutorial_content(topic_id) {
+                        Some((_, content)) => {
+                            println!("{content}");
+                            Ok(())
+                        }
+                        None => {
+                            eprintln!("Unknown tutorial topic '{topic_id}'.");
+                            eprintln!("Run 'pnm tutorial' to see available topics.");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
         Commands::Tui => match tui::run(settings).await {
             Ok(()) => Ok(()),
             Err(e) => {
