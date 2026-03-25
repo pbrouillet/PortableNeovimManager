@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Alignment, Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
@@ -10,7 +10,22 @@ use crate::config::{self, LEADER_KEY_OPTIONS};
 
 use super::app::{App, FeatureCursorItem, Screen};
 
+const MIN_WIDTH: u16 = 40;
+const MIN_HEIGHT: u16 = 10;
+
 pub fn draw(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        let msg = Paragraph::new(format!(
+            "Terminal too small ({}×{})\nMinimum: {}×{}",
+            area.width, area.height, MIN_WIDTH, MIN_HEIGHT
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Red));
+        frame.render_widget(msg, area);
+        return;
+    }
+
     match &app.screen {
         Screen::InstanceList => draw_instance_list(frame, app),
         Screen::InstanceDetail { name } => draw_instance_detail(frame, app, name),

@@ -174,6 +174,35 @@ impl App {
         }
     }
 
+    /// Clamp all cursor and scroll positions to valid bounds.
+    /// Called on terminal resize to prevent out-of-bounds indices.
+    pub fn clamp_cursors(&mut self) {
+        let inst_len = self.instance_filtered.len();
+        if inst_len == 0 {
+            self.selected = 0;
+        } else if self.selected >= inst_len {
+            self.selected = inst_len - 1;
+        }
+
+        let tut_len = self.tutorial_filtered.len();
+        if tut_len == 0 {
+            self.tutorial_cursor = 0;
+        } else if self.tutorial_cursor >= tut_len {
+            self.tutorial_cursor = tut_len - 1;
+        }
+
+        // tutorial_scroll is clamped dynamically during render, but reset to
+        // a safe upper bound here to avoid a stale large value.
+        self.tutorial_scroll = self.tutorial_scroll;
+
+        let mp_len = self.marketplace_packages.len();
+        if mp_len == 0 {
+            self.marketplace_cursor = 0;
+        } else if self.marketplace_cursor >= mp_len {
+            self.marketplace_cursor = mp_len - 1;
+        }
+    }
+
     fn refresh_instances(&mut self) {
         self.instances = load_instances(&self.settings);
         self.update_instance_filter();
@@ -704,47 +733,52 @@ pub async fn run(settings: GlobalSettings) -> Result<(), Box<dyn std::error::Err
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
         if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+            let ev = event::read()?;
+            match ev {
+                Event::Resize(_, _) => {
+                    app.clamp_cursors();
+                    continue; // redraw immediately with new size
                 }
-                match &app.screen {
-                    Screen::InstanceList => {
-                        handle_list_keys(&mut app, key.code, &mut terminal).await;
-                    }
-                    Screen::InstanceDetail { name } => {
-                        let name = name.clone();
-                        handle_detail_keys(&mut app, key.code, &name, &mut terminal).await;
-                    }
-                    Screen::EditFeatures { name } => {
-                        let name = name.clone();
-                        handle_features_keys(&mut app, key.code, &name);
-                    }
-                    Screen::EditLeaderKey { name } => {
-                        let name = name.clone();
-                        handle_leader_keys(&mut app, key.code, &name);
-                    }
-                    Screen::ConfirmDelete { name } => {
-                        let name = name.clone();
-                        handle_confirm_delete_keys(&mut app, key.code, &name);
-                    }
-                    Screen::EditSettings => {
-                        handle_settings_keys(&mut app, key.code);
-                    }
-                    Screen::TutorialList => {
-                        handle_tutorial_list_keys(&mut app, key.code);
-                    }
-                    Screen::TutorialView { .. } => {
-                        handle_tutorial_view_keys(&mut app, key.code);
-                    }
-                    Screen::Marketplace { instance_name } => {
-                        let instance_name = instance_name.clone();
-                        handle_marketplace_keys(&mut app, key.code, &instance_name).await;
-                    }
-                    Screen::CreateInstance => {
-                        handle_create_keys(&mut app, key.code, &mut terminal).await;
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    match &app.screen {
+                        Screen::InstanceList => {
+                            handle_list_keys(&mut app, key.code, &mut terminal).await;
+                        }
+                        Screen::InstanceDetail { name } => {
+                            let name = name.clone();
+                            handle_detail_keys(&mut app, key.code, &name, &mut terminal).await;
+                        }
+                        Screen::EditFeatures { name } => {
+                            let name = name.clone();
+                            handle_features_keys(&mut app, key.code, &name);
+                        }
+                        Screen::EditLeaderKey { name } => {
+                            let name = name.clone();
+                            handle_leader_keys(&mut app, key.code, &name);
+                        }
+                        Screen::ConfirmDelete { name } => {
+                            let name = name.clone();
+                            handle_confirm_delete_keys(&mut app, key.code, &name);
+                        }
+                        Screen::EditSettings => {
+                            handle_settings_keys(&mut app, key.code);
+                        }
+                        Screen::TutorialList => {
+                            handle_tutorial_list_keys(&mut app, key.code);
+                        }
+                        Screen::TutorialView { .. } => {
+                            handle_tutorial_view_keys(&mut app, key.code);
+                        }
+                        Screen::Marketplace { instance_name } => {
+                            let instance_name = instance_name.clone();
+                            handle_marketplace_keys(&mut app, key.code, &instance_name).await;
+                        }
+                        Screen::CreateInstance => {
+                            handle_create_keys(&mut app, key.code, &mut terminal).await;
+                        }
                     }
                 }
+                _ => {}
             }
         }
     }
