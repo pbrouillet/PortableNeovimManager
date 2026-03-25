@@ -34,7 +34,6 @@ pub enum Screen {
 /// A single feature checkbox within a workload.
 #[derive(Clone, Debug)]
 pub struct FeatureCheckbox {
-    pub feature_id: String,
     pub name: String,
     pub enabled: bool,
 }
@@ -339,7 +338,6 @@ impl App {
                         .features
                         .iter()
                         .map(|f| FeatureCheckbox {
-                            feature_id: f.id.clone(),
                             name: f.name.clone(),
                             enabled: workload_on && f.default_enabled,
                         })

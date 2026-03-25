@@ -8,7 +8,6 @@ const MASON_REGISTRY_API: &str =
     "https://api.github.com/repos/mason-org/mason-registry/releases/latest";
 const USER_AGENT: &str = "portable-neovim-manager";
 const CACHE_FILE: &str = "mason_registry_cache.json";
-const ETAG_FILE: &str = "mason_registry_etag.txt";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -38,10 +37,6 @@ fn cache_dir() -> PathBuf {
 
 fn cache_path() -> PathBuf {
     cache_dir().join(CACHE_FILE)
-}
-
-fn etag_path() -> PathBuf {
-    cache_dir().join(ETAG_FILE)
 }
 
 /// GitHub release API response (minimal fields we need).
