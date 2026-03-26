@@ -113,13 +113,15 @@ pub async fn create(
     download_and_install(&bin_dir, &tmp_dir, &release).await?;
 
     // Create and save manifest
-    let manifest =
+    let mut manifest =
         InstanceManifest::new(name.to_string(), release.tag_name.clone(), features.clone());
+    manifest.init_lua_post = crate::plugins::generate_default_post(&features);
+    manifest.init_lua_pre = crate::plugins::generate_default_pre(&features);
     manifest.save(&InstanceManifest::manifest_path(&base))?;
 
     // Generate and write init.lua
     let data_dir = base.join("data");
-    let init_lua = plugins::generate_init_lua(&data_dir, registry, &features, &manifest.leader_key, &manifest.mason_packages);
+    let init_lua = plugins::generate_init_lua(&data_dir, registry, &features, &manifest.leader_key, &manifest.mason_packages, manifest.init_lua_pre.as_deref(), manifest.init_lua_post.as_deref());
     let init_lua_path = base.join("config").join("nvim").join("init.lua");
     fs::write(&init_lua_path, init_lua)?;
 
@@ -265,6 +267,8 @@ pub fn update_features(
         &manifest.extra_features,
         &manifest.leader_key,
         &manifest.mason_packages,
+        manifest.init_lua_pre.as_deref(),
+        manifest.init_lua_post.as_deref(),
     );
     let init_lua_path = base.join("config").join("nvim").join("init.lua");
     fs::write(&init_lua_path, init_lua)?;

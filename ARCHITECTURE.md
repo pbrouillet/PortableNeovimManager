@@ -25,8 +25,18 @@ Supporting modules:
     loader.rs   ─ JSON loading/writing
     defaults.rs ─ Built-in workload/preset/tutorial defaults
   plugins/      ─ init.lua code generation
-  font.rs       ─ Nerd Font installer
+  font/         ─ Nerd Font installer, registry, & cross-platform terminal configurator
+    mod.rs        ─ Download, extract, register fonts (Windows registry + AddFontResource)
+    terminal.rs   ─ Generic terminal detection, TerminalInstallation/Profile/Kind types
+    wt.rs         ─ Windows Terminal provider (JSONC settings.json)
+    alacritty.rs  ─ Alacritty provider (TOML config, all platforms)
+    kitty.rs      ─ Kitty provider (INI-like conf, macOS/Linux)
+    gnome_terminal.rs ─ GNOME Terminal provider (gsettings/dconf, Linux)
+    iterm2.rs     ─ iTerm2 provider (PlistBuddy, macOS)
+    konsole.rs    ─ Konsole provider (INI profile files, Linux)
   mason_registry/ ─ Mason package registry client (fetch + cache + model)
+  monitor.rs    ─ Process memory monitoring (PID tracking, sysinfo queries, Lua RPC)
+  runtime.rs    ─ JavaScript runtime shim (Bun/Node swap, PATH manipulation)
 ```
 
 ## Module Breakdown
@@ -48,6 +58,10 @@ main()
         ├── Delete  → instance::delete()
         ├── Features→ instance::update_features()
         ├── Init    → config::init_global_settings()
+        ├── Monitor → monitor::full_snapshot()
+        ├── Runtime → runtime::setup_runtime_shims()
+        ├── InitConfig → plugins::generate_init_lua_full() (view/edit/reset)
+        ├── Font   → font::install_nerd_font() / font::apply_terminal_font_to_defaults()
         └── Tui     → tui::run()
 ```
 
@@ -111,6 +125,66 @@ XDG_STATE_HOME  → <instance>/state
 ```
 
 This is the core isolation mechanism. Neovim uses these paths for its config, plugins, cache, and state — so each instance is a completely independent Neovim installation.
+
+Additionally, launch now writes a PID file (`nvim.pid`) and RPC address file (`nvim-rpc-addr.txt`) to the instance directory, and adds `--listen <address>` to the Neovim command for RPC access. Both files are cleaned up when Neovim exits.
+
+### `monitor.rs` — Process Memory Monitoring
+
+Provides memory monitoring for running Neovim instances.
+
+**Data types:**
+
+```rust
+struct ProcessMemory {
+    pid: u32,
+    name: String,
+    working_set_bytes: u64,
+    virtual_memory_bytes: u64,
+    cpu_percent: f32,
+}
+
+struct InstanceMemorySnapshot {
+    nvim_process: ProcessMemory,
+    child_processes: Vec<ProcessMemory>,
+    lua_memory_bytes: Option<u64>,
+    total_working_set_bytes: u64,
+    total_virtual_memory_bytes: u64,
+    timestamp: DateTime<Utc>,
+}
+```
+
+**Key functions:**
+- `read_pid_file()` / `write_pid_file()` / `remove_pid_file()` — PID file management
+- `is_process_alive(pid)` — checks PID liveness via sysinfo
+- `snapshot_memory(pid)` — queries sysinfo for the Neovim process and all descendants
+- `query_lua_memory(nvim_binary, rpc_addr)` — shells out to `nvim --server --remote-expr` to get Lua heap size
+- `full_snapshot(instance_dir, nvim_binary)` — combines process + Lua memory into a complete snapshot
+- `format_bytes(n)` — human-readable byte formatting
+
+Uses the `sysinfo` crate for cross-platform process memory queries (working set, virtual memory, CPU, process tree walking).
+
+### `runtime.rs` — JavaScript Runtime Shim
+
+Allows transparently replacing Node.js with Bun (or another JS runtime) for all Neovim plugins. Many plugins (LSP servers, formatters, Copilot, DAP adapters) spawn `node` processes that can consume significant memory.
+
+**Mechanism:** Creates a `shims/` directory inside the instance containing platform-specific shim files that redirect `node`/`npm`/`npx` calls to the configured runtime:
+- **Windows:** `node.cmd` (batch redirect) + `node.exe` (copy of runtime binary) + `npm.cmd`/`npx.cmd`
+- **Unix:** `node` shell script (`exec bun "$@"`) + `npm`/`npx` scripts
+
+**Key functions:**
+- `resolve_js_runtime(manifest, settings)` — cascaded resolution: instance override → global default → None
+- `find_runtime_binary(value)` — locates the runtime ("bun" → PATH search, abs path → validate)
+- `create_node_shims(instance_dir, binary)` — writes platform shims, returns shims dir
+- `build_path_with_shims(shims_dir)` — prepends shims dir to PATH
+- `setup_runtime_shims(instance_dir, manifest, settings)` — full setup entry point
+
+**Configuration:**
+- `InstanceManifest.js_runtime` — per-instance override (None = use global)
+- `GlobalSettings.default_js_runtime` — global default (None = system Node)
+
+The shims dir is created at launch and cleaned up when Neovim exits.
+
+**Plugin-level overrides:** Some plugins (notably copilot.vim) have their own Node discovery logic that bypasses PATH. The generated `init.lua` includes a dynamic detection block that sets `vim.g.copilot_node_command` and `vim.g.node_host_prog` to point at the shim when it exists. This block is always present but only activates when the shims directory is populated (i.e., during a pnm-launched session with a JS runtime override). Changing the runtime setting (`pnm runtime --set`/`--unset` or TUI `B` toggle) triggers init.lua regeneration.
 
 ### `github.rs` — GitHub Releases API Client
 
@@ -193,23 +267,61 @@ Generates a complete `init.lua` for an instance:
 
 1. **Lazy.nvim bootstrap** — clones lazy.nvim into the instance's data directory on first launch
 2. **Leader key** — sets `mapleader` and `maplocalleader`
-3. **Plugin specs** — collects specs from all active workloads (base + enabled optional), iterating features within each workload and respecting disabled/extra feature overrides
-4. **Feature configs** — appends each workload's `config_lua` block (keymaps, plugin setup calls)
-5. **Base settings** — line numbers, termguicolors, clipboard, undo, search
-6. **User hook** — loads `user.lua` from the config directory if it exists
-7. **Mason ensure_installed** — if `mason_packages` is non-empty, generates a deferred block that uses the mason-registry Lua API to auto-install selected tools on launch
+3. **JS runtime override** — dynamic detection block for `copilot_node_command` and `node_host_prog`
+4. **Init overrides: pre-plugins** — user/auto-generated Lua injected before plugin setup
+5. **Plugin specs** — collects specs from all active workloads (base + enabled optional)
+6. **Feature configs** — appends each workload's `config_lua` block (keymaps, plugin setup calls)
+7. **Mason ensure_installed** — deferred block to auto-install selected tools
+8. **Init overrides: post-plugins** — user/auto-generated Lua injected after plugin setup
+9. **Base settings** — line numbers, termguicolors, clipboard, undo, search
+10. **User hook** — loads `user.lua` from the config directory if it exists
 
-The init.lua is regeneratedwhenever features or the leader key change. Users should put customizations in `user.lua` rather than editing `init.lua` directly.
+The init.lua is regenerated whenever features, leader key, runtime, or init config overrides change. Users should put customizations in `user.lua` rather than editing `init.lua` directly.
 
-### `font.rs` — Nerd Font Installer
+### `plugins/init_defaults.rs` — Smart Init Defaults
 
-Downloads and installs JetBrainsMono Nerd Font from GitHub. Platform-specific install locations:
+Generates feature-aware default Lua for init config overrides. Currently:
+- **TreeView** → `init_lua_post` with VimEnter autocmd that opens neo-tree when no files are passed
+
+Also provides resolution functions (`resolve_init_lua_pre`/`resolve_init_lua_post`) for the instance → global settings cascade.
+
+### `font/` — Nerd Font Installer & Cross-Platform Terminal Configurator
+
+Downloads, installs, and registers JetBrainsMono Nerd Font, then optionally configures detected terminal emulators to use it.
+
+**Font Installation** (`mod.rs`) — Platform-specific install locations:
 
 - **Windows:** `%LOCALAPPDATA%\Microsoft\Windows\Fonts`
+  - Registers fonts in `HKCU\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts` (per-user, no admin)
+  - Calls `AddFontResource` + broadcasts `WM_FONTCHANGE` for immediate availability
 - **macOS:** `~/Library/Fonts`
 - **Linux:** `~/.local/share/fonts` (runs `fc-cache -f` after install)
 
 Checks for existing font files before downloading to avoid reinstallation.
+
+**Terminal Provider Abstraction** (`terminal.rs`):
+
+- `TerminalKind` enum: WindowsTerminal, Alacritty, Kitty, GnomeTerminal, ITerm2, Konsole, WezTerm
+- `TerminalInstallation` / `TerminalProfile` — generic types for any detected terminal
+- `find_terminals()` — dispatches to platform-specific providers, returns all detected terminals
+- `apply_font_to_defaults()` / `apply_font_to_profiles()` — generic font application
+
+**Supported Providers:**
+
+| Provider | Platform | Config Format | Notes |
+|----------|----------|---------------|-------|
+| Windows Terminal (`wt.rs`) | Windows | JSONC | Discovers 3 known settings.json paths; `json_comments` for JSONC |
+| Alacritty (`alacritty.rs`) | All | TOML | Uses `toml_edit` to preserve comments/formatting |
+| Kitty (`kitty.rs`) | macOS/Linux | INI-like text | Line-based find/replace of `font_family` |
+| GNOME Terminal (`gnome_terminal.rs`) | Linux | dconf | Uses `gsettings`/`dconf` subprocesses |
+| iTerm2 (`iterm2.rs`) | macOS | plist | Uses `/usr/libexec/PlistBuddy` |
+| Konsole (`konsole.rs`) | Linux | INI profile | Edits `Font=` in `[Appearance]` section |
+
+All file-based providers create `.pnm-backup` before modifying config files.
+
+**CLI:** `pnm font install` / `pnm font status` / `pnm font configure-terminal`
+
+**TUI:** After font install, the `ConfigureTerminalFont` screen shows a checkbox list of discovered terminal profiles across all detected emulators.
 
 ### `mason_registry/` — Mason Package Registry Client
 
@@ -240,7 +352,7 @@ struct MasonRegistry { packages: Vec<MasonPackage> }
 
 Built with `ratatui` (rendering) and `crossterm` (terminal events).
 
-**`app.rs`** — State machine with seven screens:
+**`app.rs`** — State machine with twelve screens:
 
 ```
 InstanceList ──Enter──▶ InstanceDetail
@@ -257,9 +369,16 @@ InstanceList/Detail ──d──▶ ConfirmDelete ──y──▶ InstanceList
                                          ──n──▶ Back
 
 InstanceList ──s──▶ EditSettings ──Esc──▶ InstanceList
+
+InstanceDetail ──M──▶ Monitor ──Esc──▶ InstanceDetail
+InstanceDetail ──I──▶ InitConfig ──e──▶ InlineEditor ──Ctrl+S──▶ InitConfig ──Esc──▶ InstanceDetail
+                                                      ──Esc(dirty)──▶ DiscardPrompt ──y──▶ InitConfig
+                                                                                     ──n──▶ InlineEditor
 ```
 
-The `App` struct holds all state: instance list, selection cursor, current screen, hierarchical workload/feature checkbox state, workload registry, global settings, instance search filter, settings editor state, and tutorial browsing state.
+**`lua_highlight.rs`** — Lua syntax tokenizer for TUI rendering. Produces colored `Span`s per line: keywords (blue/bold), strings (green), comments (gray), `vim.*` API (cyan), numbers (yellow). Used by both view and edit modes.
+
+The `App` struct holds all state: instance list, selection cursor, current screen, hierarchical workload/feature checkbox state, workload registry, global settings, instance search filter, settings editor state, tutorial browsing state, monitor snapshot state, init config panel/scroll state, and inline editor state (buffer, cursor position, scroll, undo/redo stacks, dirty flag, original buffer snapshot, discard confirmation).
 
 The EditFeatures screen shows workloads as expandable groups with dependency annotations (e.g., "[requires: LSP]" and "[needed by: Python, Node]"). Pressing space toggles a workload (all features), right/l expands to show individual features, and left/h collapses.
 
@@ -309,6 +428,12 @@ settings.json           # Optional, created by `pnm init`
 instances/
 ├── my-instance/
 │   ├── manifest.json
+│   ├── nvim.pid            # Written at launch, removed on exit (monitoring)
+│   ├── nvim-rpc-addr.txt   # RPC listen address, removed on exit (monitoring)
+│   ├── shims/              # JS runtime shims, created at launch if js_runtime set
+│   │   ├── node.cmd        # (Windows) Batch redirect to Bun
+│   │   ├── node.exe        # (Windows) Copy of runtime binary
+│   │   └── npm.cmd         # (Windows) npm redirect
 │   ├── bin/
 │   │   └── nvim-win64/    # Extracted Neovim distribution
 │   │       ├── bin/
@@ -327,6 +452,33 @@ instances/
     └── ...
 ```
 
+## Monitoring Principles
+
+### Process Discovery
+
+When pnm launches Neovim, it writes a `nvim.pid` file to the instance directory containing the process ID. The monitor reads this file to locate the running process. Both the PID file and RPC address file are cleaned up when Neovim exits normally. If Neovim crashes, these files become stale — the monitor validates PID liveness before reporting and automatically cleans up stale files.
+
+### Memory Metrics
+
+- **Working Set** (RSS): Physical RAM currently in use by the process. This is the primary resource-pressure indicator because it represents memory your system must actually provide. Reported by `sysinfo` via `GetProcessMemoryInfo` (Windows) or reading `/proc/<pid>/status` (Linux).
+- **Virtual Memory**: Total address space reserved by the process. Typically much larger than working set because it includes memory-mapped files, shared libraries, and reserved-but-uncommitted pages. A high virtual memory number is normal and not a concern on its own.
+
+### Process Tree Walking
+
+The monitor uses `sysinfo` to enumerate all processes in the system, then walks parent-child relationships starting from the Neovim PID to collect all descendants. Each child process (LSP servers like `rust-analyzer`, formatters like `prettierd`, DAP adapters, etc.) is reported individually with its own working set and virtual memory. Process names come from the OS process table.
+
+### Lua Heap Introspection
+
+Neovim is launched with `--listen <address>` to enable its RPC interface:
+- **Windows**: Named pipe `\\.\pipe\pnm-nvim-<instance-name>`
+- **Unix**: Unix domain socket `<instance-dir>/nvim-rpc.sock`
+
+The monitor connects via `nvim --server <addr> --remote-expr` to execute `collectgarbage("count")` inside Neovim's Lua runtime, returning the total Lua heap size in bytes. This represents the combined memory of all Lua plugins. Per-plugin breakdown is not available because Lua's garbage collector does not track allocations per module.
+
+### Non-Intrusiveness
+
+Monitoring is entirely read-only. It uses OS-level process queries (via sysinfo) and a single lightweight RPC call (Lua `collectgarbage`). It does not inject code into Neovim, modify plugin behavior, or affect Neovim's performance in any measurable way.
+
 ## Error Handling
 
 Each module defines its own error type using `thiserror`:
@@ -336,6 +488,7 @@ Each module defines its own error type using `thiserror`:
 - `GithubError` — HTTP and API errors
 - `ArchiveError` — extraction failures
 - `NeovimError` — binary not found, launch failures
+- `MonitorError` — instance not running, PID file errors, process not found, RPC errors
 
 The TUI catches errors and displays them as status messages rather than crashing.
 

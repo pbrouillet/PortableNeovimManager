@@ -25,6 +25,9 @@ pub enum Commands {
         /// Features to enable (lsp, dap, treeview, tabs). Comma-separated.
         #[arg(short, long, value_delimiter = ',')]
         features: Option<Vec<String>>,
+        /// JavaScript runtime ("bun" or path). Overrides system Node for plugins.
+        #[arg(long)]
+        js_runtime: Option<String>,
     },
     /// List all portable Neovim instances
     List,
@@ -87,6 +90,62 @@ pub enum Commands {
     },
     /// Open the interactive TUI
     Tui,
+    /// Show memory usage of a running Neovim instance
+    #[command(after_long_help = "EXAMPLES:\n  pnm monitor my-env              # Snapshot memory usage\n  pnm monitor my-env --no-lua     # Skip Lua heap query")]
+    Monitor {
+        /// Instance name
+        name: String,
+        /// Skip Lua heap memory query via RPC
+        #[arg(long)]
+        no_lua: bool,
+    },
+    /// Get or set the JavaScript runtime for an instance
+    #[command(after_long_help = "EXAMPLES:\n  pnm runtime my-env              # Show current runtime\n  pnm runtime my-env --set bun    # Use Bun instead of Node\n  pnm runtime my-env --set /path/to/bun  # Custom path\n  pnm runtime my-env --unset      # Revert to system Node")]
+    Runtime {
+        /// Instance name
+        name: String,
+        /// Set the JavaScript runtime ("bun" or an absolute path)
+        #[arg(long)]
+        set: Option<String>,
+        /// Clear per-instance runtime override (use global default)
+        #[arg(long)]
+        unset: bool,
+    },
+    /// View, edit, or reset the init.lua configuration overrides for an instance
+    #[command(name = "init-config", after_long_help = "EXAMPLES:\n  pnm init-config my-env                # Show current overrides\n  pnm init-config my-env --edit-pre     # Edit pre-plugins Lua in $EDITOR\n  pnm init-config my-env --edit-post    # Edit post-plugins Lua in $EDITOR\n  pnm init-config my-env --reset        # Reset to smart defaults based on features")]
+    InitConfig {
+        /// Instance name
+        name: String,
+        /// Open $EDITOR to edit pre-plugins Lua
+        #[arg(long)]
+        edit_pre: bool,
+        /// Open $EDITOR to edit post-plugins Lua
+        #[arg(long)]
+        edit_post: bool,
+        /// Reset overrides to smart defaults based on current features
+        #[arg(long)]
+        reset: bool,
+    },
+    /// Install and configure Nerd Font for Neovim
+    #[command(after_long_help = "EXAMPLES:\n  pnm font install              # Download, install, and configure Windows Terminal\n  pnm font install --no-terminal # Install font only, skip terminal configuration\n  pnm font status                # Check if font is installed and terminal configured\n  pnm font configure-terminal    # Configure Windows Terminal without reinstalling")]
+    Font {
+        #[command(subcommand)]
+        action: FontAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FontAction {
+    /// Download, install, and configure JetBrainsMono Nerd Font
+    Install {
+        /// Skip Windows Terminal configuration
+        #[arg(long)]
+        no_terminal: bool,
+    },
+    /// Check if Nerd Font is installed and terminal is configured
+    Status,
+    /// Configure Windows Terminal to use the installed Nerd Font
+    ConfigureTerminal,
 }
 
 #[derive(Subcommand, Debug)]

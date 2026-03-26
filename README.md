@@ -47,6 +47,7 @@ pnm create full -f lsp,dap,treeview,tabs # With features enabled
 |------|-------------|
 | `-v, --version <tag>` | Neovim version tag (e.g. `v0.10.4`, `nightly`). Defaults to latest stable. |
 | `-f, --features <list>` | Comma-separated features to enable. |
+| `--js-runtime <value>` | JavaScript runtime override (`bun` or absolute path). See [JavaScript Runtime](#javascript-runtime). |
 
 ### `pnm list`
 
@@ -119,6 +120,79 @@ Installed packages are auto-installed by Mason on the next Neovim launch. The re
 
 Create a default `settings.json` next to the executable. Safe to run multiple times — won't overwrite an existing file.
 
+### `pnm monitor <name>`
+
+Show memory usage of a running Neovim instance.
+
+```bash
+pnm monitor dev                # Full memory snapshot
+pnm monitor dev --no-lua       # Skip Lua heap query
+```
+
+Output includes:
+- **Working set** (physical RAM) and **virtual memory** of the Neovim process
+- **CPU usage** percentage
+- **Lua heap** total (via RPC, unless `--no-lua`)
+- **Child processes** (LSP servers, formatters, DAP adapters) with individual memory stats
+- **Totals** across the process tree
+
+```
+Instance: dev (PID 12345)
+──────────────────────────────────────────────────
+Neovim process:
+  Working Set:    128.4 MB
+  Virtual Memory: 512.0 MB
+  CPU:            2.3%
+
+Lua Heap:         14.2 MB
+
+Child Processes (3):
+  PID      NAME                      WORKING SET     VIRTUAL
+  23456    rust-analyzer              245.1 MB        1.2 GB
+  23457    pyright                    89.3 MB         340.0 MB
+  23458    lua-language-server        12.1 MB         80.0 MB
+
+Total Working Set:  474.8 MB
+Total Virtual:      2.1 GB
+```
+
+| Flag | Description |
+|------|-------------|
+| `--no-lua` | Skip the Lua heap memory query (useful if RPC is not available) |
+
+### `pnm runtime <name>`
+
+Get or set the JavaScript runtime for an instance. By default, plugins use the system Node.js. You can swap it for [Bun](https://bun.sh/) (or another runtime) to reduce memory usage.
+
+```bash
+pnm runtime dev                    # Show current runtime setting
+pnm runtime dev --set bun          # Use Bun instead of Node
+pnm runtime dev --set /path/to/bun # Custom path
+pnm runtime dev --unset            # Revert to system Node
+```
+
+| Flag | Description |
+|------|-------------|
+| `--set <value>` | Set JS runtime (`bun` to find on PATH, or an absolute path) |
+| `--unset` | Clear per-instance override, revert to global default |
+
+### `pnm init-config <name>`
+
+View, edit, or reset the init.lua configuration overrides for an instance.
+
+```bash
+pnm init-config dev                # Show current pre/post overrides
+pnm init-config dev --edit-pre     # Edit pre-plugins Lua in $EDITOR
+pnm init-config dev --edit-post    # Edit post-plugins Lua in $EDITOR
+pnm init-config dev --reset        # Reset to smart defaults based on features
+```
+
+| Flag | Description |
+|------|-------------|
+| `--edit-pre` | Open `$EDITOR` to edit pre-plugins Lua (runs before `lazy.setup()`) |
+| `--edit-post` | Open `$EDITOR` to edit post-plugins Lua (runs after plugin setup) |
+| `--reset` | Regenerate smart defaults based on current enabled features |
+
 ### `pnm tui`
 
 Open the interactive terminal UI for managing instances.
@@ -157,6 +231,29 @@ Choose from Space, Comma, Backslash, or Semicolon. Applied immediately to `init.
 ### Marketplace screen
 
 Browse the mason-registry catalog of 500+ packages. Navigate with `j`/`k`, switch categories with `Tab`, search with `/`, toggle packages with `Space`, and apply with `Enter`. Installed packages show a `●` marker.
+
+### Monitor screen
+
+Shows live memory usage of a running Neovim instance. Access from Instance Detail with `M`. Auto-refreshes every 2 seconds.
+
+Displays working set (physical RAM), virtual memory, CPU %, Lua heap, and all child processes (LSP servers, formatters, DAP adapters) with individual memory stats. Press `r` to force refresh, `Esc` to go back.
+
+### Init Config screen
+
+View and manage init.lua configuration overrides. Access from Instance Detail with `I`.
+
+Shows two panels: **Pre-plugins** (Lua that runs before `lazy.setup()`) and **Post-plugins** (Lua that runs after plugin setup). Both panels display Lua code with **syntax highlighting** (keywords, strings, comments, `vim.*` API, numbers). Press `Tab` to switch panels, `↑`/`↓` to scroll, `d` to reset to smart defaults, `Esc` to go back.
+
+#### Inline editor
+
+Press `e` to edit the focused panel in an inline syntax-highlighted editor. The editor supports:
+
+- **Character input**, `Enter` (newline), `Backspace`, `Delete`
+- **Arrow keys**, `Home`/`End` for cursor movement
+- **Tab** to insert 2-space indent
+- **Ctrl+Z** / **Ctrl+Y** for undo/redo (full-buffer snapshots, 100 levels)
+- **Ctrl+S** to save changes and return to view mode (regenerates `init.lua` automatically)
+- **Esc** to exit — prompts to discard if there are unsaved changes (`[modified]` indicator in header)
 
 ## Features (Workloads)
 
@@ -246,6 +343,142 @@ The generated config sets `vim.opt.clipboard = "unnamedplus"`. This requires a c
 ```bash
 pnm create ci-env --version v0.10.4
 ```
+
+## JavaScript Runtime
+
+Many Neovim plugins spawn Node.js processes — LSP servers, formatters, linters, Copilot, and DAP adapters all use `node`. These can consume significant memory (sometimes ~1GB+ combined).
+
+pnm lets you transparently replace Node.js with [Bun](https://bun.sh/), a faster and more memory-efficient JavaScript runtime.
+
+### How it works
+
+When enabled, pnm creates a `shims/` directory in the instance with a fake `node` executable that delegates to Bun. This directory is prepended to PATH when launching Neovim, so every plugin that invokes `node`, `npm`, or `npx` transparently gets Bun instead.
+
+Additionally, the generated `init.lua` includes a runtime detection block that sets `vim.g.copilot_node_command` and `vim.g.node_host_prog` to point at the shim. This ensures plugins like **copilot.vim** (which has its own Node discovery logic that bypasses PATH) and Neovim's built-in Node provider also use the alternative runtime.
+
+### Enabling Bun
+
+```bash
+# Per-instance (CLI)
+pnm runtime dev --set bun
+
+# At creation time
+pnm create dev --features lsp,treeview --js-runtime bun
+
+# TUI: press B on the Instance Detail screen to toggle
+```
+
+### Global default
+
+Set a global default in `settings.json` (or press Enter on "Default JS Runtime" in TUI settings):
+
+```json
+{
+  "default_js_runtime": "bun"
+}
+```
+
+Per-instance settings override the global default. Use `pnm runtime <name> --unset` to revert an instance to the global default.
+
+### Compatibility
+
+Bun is highly compatible with Node.js but not 100%. Most LSP servers, formatters, and linters work fine. Known caveats:
+
+- **copilot.vim** — pnm automatically sets `vim.g.copilot_node_command` to redirect Copilot to the shim. If Copilot still misbehaves (e.g., Node version checks), revert with `pnm runtime <name> --unset`
+- Some Mason packages that use native Node addons may not work with Bun
+- Mason wrapper scripts created *before* enabling Bun may have hardcoded Node paths — reinstall affected Mason packages after enabling Bun (`MasonInstall <package>`)
+- The shim is scoped to the instance — it doesn't affect other programs on your system
+
+### Reverting
+
+```bash
+pnm runtime dev --unset    # CLI
+# or press B again in TUI Instance Detail
+```
+
+## Init Config Overrides
+
+pnm lets you inject custom Lua into the generated `init.lua` at two injection points:
+
+- **Pre-plugins** — runs before `require("lazy").setup()`. Use for `vim.g` variables, `vim.opt` overrides, or anything that must be set before plugins load.
+- **Post-plugins** — runs after plugin setup and feature config blocks. Use for autocmds, UI tweaks, or behaviors that depend on plugins being loaded.
+
+### Smart defaults
+
+When creating an instance, pnm auto-populates post-plugins with sensible defaults based on enabled features:
+
+- **TreeView** → auto-opens the neo-tree explorer sidebar on startup (when no files are passed)
+
+More defaults will be added for other features over time.
+
+### Editing
+
+```bash
+pnm init-config dev --edit-post    # Edit post-plugins Lua in $EDITOR
+pnm init-config dev --edit-pre     # Edit pre-plugins Lua in $EDITOR
+pnm init-config dev --reset        # Reset to smart defaults
+
+# TUI: press I on Instance Detail → view/edit/reset overrides
+# In Init Config screen, press e to open inline syntax-highlighted editor
+```
+
+### Global defaults
+
+Set global defaults in `settings.json`:
+
+```json
+{
+  "default_init_lua_pre": "vim.opt.mouse = ''",
+  "default_init_lua_post": "-- your custom post-plugins Lua"
+}
+```
+
+Per-instance overrides take precedence. Instances with no override inherit the global default.
+
+### How it works
+
+The overrides are stored in the instance's `manifest.json` as `init_lua_pre` and `init_lua_post` strings. They're injected into the generated `init.lua` at their respective positions. The `user.lua` sourcing mechanism (at the very end of `init.lua`) remains available for additional customizations that shouldn't be managed by pnm.
+
+## Monitoring
+
+pnm can monitor the memory consumption of running Neovim instances — both the Neovim process itself and all child processes it spawns (LSP servers, formatters, DAP adapters, etc.).
+
+### What gets measured
+
+| Metric | Description |
+|--------|-------------|
+| **Working Set** | Physical RAM currently in use (RSS). This is the primary resource-pressure indicator — it's the memory your system actually has to provide. |
+| **Virtual Memory** | Total address space reserved by the process. Typically much larger than working set because it includes memory-mapped files, shared libraries, and reserved-but-uncommitted pages. A high virtual memory number is normal and usually not a concern. |
+| **CPU %** | CPU usage percentage at the time of the snapshot. |
+| **Lua Heap** | Total memory used by Neovim's embedded Lua runtime (all plugins combined). Queried via Neovim's RPC interface using `collectgarbage("count")`. Per-plugin breakdown is not available because Neovim's Lua runtime doesn't track allocations per module. |
+| **Child Processes** | Each process spawned by Neovim (LSP servers, formatters, DAP adapters) is reported individually with its own working set and virtual memory. Process names come from the OS process table. |
+
+### How it works
+
+When pnm launches Neovim, it:
+1. Uses `.spawn()` to get the process ID (PID)
+2. Writes `nvim.pid` to the instance directory
+3. Adds `--listen <address>` to enable Neovim's RPC interface
+4. Writes the RPC address to `nvim-rpc-addr.txt`
+5. Cleans up both files when Neovim exits
+
+The monitor reads the PID file, queries the OS for process memory stats using `sysinfo`, walks the process tree to find child processes, and optionally connects to Neovim's RPC to query the Lua heap.
+
+### Usage
+
+```bash
+# CLI one-shot snapshot
+pnm monitor my-env
+
+# TUI live monitor (press M from Instance Detail)
+pnm tui
+```
+
+### Limitations
+
+- Only instances launched through pnm are monitorable (PID file is required)
+- Lua heap is reported as a total — per-plugin memory breakdown is not supported by Neovim
+- If Neovim crashes, the PID file may become stale; the monitor detects and cleans this up automatically
 
 ## Platform Support
 

@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
+use crate::monitor;
+use crate::runtime;
+
 #[derive(Debug, Error)]
 pub enum NeovimError {
     #[error(transparent)]
@@ -77,13 +80,26 @@ fn search_dir_recursive(dir: &Path, candidates: &[&str]) -> Option<PathBuf> {
 ///
 /// All configuration, data, cache, and state directories are scoped to the
 /// instance so that multiple portable installations stay independent.
+///
+/// Writes a PID file (`nvim.pid`) and RPC address file (`nvim-rpc-addr.txt`)
+/// to the instance directory for monitoring. Both are cleaned up on exit.
+///
+/// If `js_runtime_path` is `Some`, a shims directory is created with a `node`
+/// shim that delegates to the specified runtime, and the shims dir is
+/// prepended to PATH.
 pub fn launch(
     instance_dir: &Path,
+    instance_name: &str,
     extra_args: &[String],
+    js_runtime_path: Option<std::ffi::OsString>,
 ) -> Result<std::process::ExitStatus, NeovimError> {
     let nvim = find_nvim_binary(instance_dir)?;
 
-    let status = Command::new(&nvim)
+    let rpc_addr = monitor::rpc_listen_addr(instance_dir, instance_name);
+
+    let mut cmd = Command::new(&nvim);
+    cmd.arg("--listen")
+        .arg(&rpc_addr)
         .args(extra_args)
         .env("XDG_CONFIG_HOME", instance_dir.join("config"))
         .env("XDG_DATA_HOME", instance_dir.join("data"))
@@ -91,9 +107,34 @@ pub fn launch(
         .env("XDG_STATE_HOME", instance_dir.join("state"))
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
+        .stderr(std::process::Stdio::inherit());
+
+    // Apply runtime shim PATH if configured
+    if let Some(ref new_path) = js_runtime_path {
+        cmd.env("PATH", new_path);
+    }
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| NeovimError::LaunchFailed(e.to_string()))?;
+
+    // Write PID and RPC address files for monitoring
+    let pid = child.id();
+    let _ = monitor::write_pid_file(instance_dir, pid);
+    let _ = monitor::write_rpc_addr_file(instance_dir, &rpc_addr);
+
+    // Wait for Neovim to exit, then clean up
+    let status = child
+        .wait()
+        .map_err(|e| NeovimError::LaunchFailed(e.to_string()))?;
+
+    monitor::remove_pid_file(instance_dir);
+    monitor::remove_rpc_addr_file(instance_dir);
+
+    // Clean up shims directory if we created one
+    if js_runtime_path.is_some() {
+        runtime::cleanup_shims(instance_dir);
+    }
 
     Ok(status)
 }

@@ -63,8 +63,17 @@ pub struct InstanceManifest {
     /// Mason packages to auto-install (e.g. ["pyright", "rust-analyzer", "debugpy"]).
     #[serde(default)]
     pub mason_packages: Vec<String>,
+    /// JavaScript runtime override. None = system Node, "bun" = use Bun, or abs path.
+    #[serde(default)]
+    pub js_runtime: Option<String>,
     #[serde(default = "default_leader_key")]
     pub leader_key: String,
+    /// Custom Lua injected before plugin setup (vim.g, vim.opt overrides).
+    #[serde(default)]
+    pub init_lua_pre: Option<String>,
+    /// Custom Lua injected after plugin setup (autocmds, UI tweaks).
+    #[serde(default)]
+    pub init_lua_post: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -79,7 +88,10 @@ impl InstanceManifest {
             disabled_features: vec![],
             extra_features: vec![],
             mason_packages: vec![],
+            js_runtime: None,
             leader_key: default_leader_key(),
+            init_lua_pre: None,
+            init_lua_post: None,
             created_at: now,
             updated_at: now,
         }
@@ -133,6 +145,15 @@ pub struct GlobalSettings {
     /// Require confirmation for destructive actions (delete/update).
     #[serde(default = "default_confirm_destructive")]
     pub confirm_destructive: bool,
+    /// Default JavaScript runtime for new instances. None = system Node, "bun" = Bun.
+    #[serde(default)]
+    pub default_js_runtime: Option<String>,
+    /// Default Lua injected before plugin setup for all instances.
+    #[serde(default)]
+    pub default_init_lua_pre: Option<String>,
+    /// Default Lua injected after plugin setup for all instances.
+    #[serde(default)]
+    pub default_init_lua_post: Option<String>,
 }
 
 impl Default for GlobalSettings {
@@ -142,6 +163,9 @@ impl Default for GlobalSettings {
             default_version: None,
             default_leader_key: default_leader_key(),
             confirm_destructive: true,
+            default_js_runtime: None,
+            default_init_lua_pre: None,
+            default_init_lua_post: None,
         }
     }
 }
