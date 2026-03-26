@@ -127,7 +127,7 @@ pub enum Commands {
         reset: bool,
     },
     /// Install and configure Nerd Font for Neovim
-    #[command(after_long_help = "EXAMPLES:\n  pnm font install              # Download, install, and configure Windows Terminal\n  pnm font install --no-terminal # Install font only, skip terminal configuration\n  pnm font status                # Check if font is installed and terminal configured\n  pnm font configure-terminal    # Configure Windows Terminal without reinstalling")]
+    #[command(after_long_help = "EXAMPLES:\n  pnm font install              # Download, install, and configure Windows Terminal\n  pnm font install --no-terminal # Install font only, skip terminal configuration\n  pnm font status                # Check if font is installed and terminal configured\n  pnm font configure-terminal    # Configure Windows Terminal without reinstalling\n  pnm font reset                 # Remove installed font files and registry entries")]
     Font {
         #[command(subcommand)]
         action: FontAction,
@@ -146,6 +146,8 @@ pub enum FontAction {
     Status,
     /// Configure Windows Terminal to use the installed Nerd Font
     ConfigureTerminal,
+    /// Remove installed Nerd Font files and clean up registry entries
+    Reset,
 }
 
 #[derive(Subcommand, Debug)]

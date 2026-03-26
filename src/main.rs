@@ -902,6 +902,10 @@ async fn handle_font(action: cli::FontAction) {
             }
             println!("\nDone. Restart your terminal to see the new font.");
         }
+        FontAction::Reset => {
+            let result = font::reset_nerd_font();
+            println!("{}", result.message);
+        }
     }
 }
 

@@ -202,6 +202,79 @@ pub fn is_font_installed() -> bool {
     fonts_dir().is_some_and(|dir| font_files_exist(&dir))
 }
 
+// ── Font reset ──────────────────────────────────────────────────────────────
+
+/// Result of a font reset operation.
+pub struct FontResetResult {
+    pub removed_count: u32,
+    pub message: String,
+}
+
+/// Remove all JetBrainsMono Nerd Font .ttf files from the given directory.
+/// Returns the number of files successfully deleted.
+fn remove_font_files(dir: &Path) -> u32 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0u32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("JetBrainsMonoNerd") && name_str.ends_with(".ttf") {
+            if fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// Reset the Nerd Font installation: delete font files and clean up
+/// platform-specific registrations (Windows registry entries, font activation).
+pub fn reset_nerd_font() -> FontResetResult {
+    let Some(dest_dir) = fonts_dir() else {
+        return FontResetResult {
+            removed_count: 0,
+            message: "Could not determine fonts directory for this platform.".to_string(),
+        };
+    };
+
+    if !font_files_exist(&dest_dir) {
+        return FontResetResult {
+            removed_count: 0,
+            message: "No Nerd Font files found — nothing to reset.".to_string(),
+        };
+    }
+
+    // Platform-specific pre-removal (deactivate before deleting files)
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(e) = deactivate_fonts_windows(&dest_dir) {
+            eprintln!("Warning: font deactivation failed: {e}");
+        }
+        if let Err(e) = unregister_fonts_windows() {
+            eprintln!("Warning: registry cleanup failed: {e}");
+        }
+    }
+
+    let removed = remove_font_files(&dest_dir);
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("fc-cache").arg("-f").status();
+    }
+
+    FontResetResult {
+        removed_count: removed,
+        message: format!(
+            "✓ Removed {removed} font file{} from {}.\n\
+             Run `pnm font install` to reinstall.",
+            if removed == 1 { "" } else { "s" },
+            dest_dir.display()
+        ),
+    }
+}
+
 // ── Windows font registration ───────────────────────────────────────────────
 
 /// Derive a human-readable registry font name from a Nerd Font filename.
@@ -293,6 +366,62 @@ fn activate_fonts_windows(fonts_dir: &Path) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn unregister_fonts_windows() -> Result<(), Box<dyn std::error::Error>> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (fonts_key, _) = hkcu.create_subkey(
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts",
+    )?;
+
+    // Collect matching value names first, then delete
+    let to_delete: Vec<String> = fonts_key
+        .enum_values()
+        .filter_map(|v| v.ok())
+        .map(|(name, _)| name)
+        .filter(|name| name.contains("Jet Brains Mono Nerd"))
+        .collect();
+
+    for name in &to_delete {
+        let _ = fonts_key.delete_value(name);
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn deactivate_fonts_windows(fonts_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use windows::Win32::Graphics::Gdi::RemoveFontResourceW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SendMessageW, WM_FONTCHANGE,
+    };
+    use windows::core::HSTRING;
+
+    for entry in fs::read_dir(fonts_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if !name_str.starts_with("JetBrainsMonoNerd") || !name_str.ends_with(".ttf") {
+            continue;
+        }
+
+        let path_str = entry.path().to_string_lossy().to_string();
+        let hstring = HSTRING::from(&path_str);
+        unsafe {
+            let _ = RemoveFontResourceW(&hstring);
+        }
+    }
+
+    unsafe {
+        let _ = SendMessageW(HWND_BROADCAST, WM_FONTCHANGE, None, None);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +461,129 @@ mod tests {
     #[test]
     fn test_font_face_constant() {
         assert_eq!(NERD_FONT_FACE, "JetBrainsMono Nerd Font");
+    }
+
+    // ── font_files_exist tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_font_files_exist_finds_matching() {
+        let dir = std::env::temp_dir().join("pnm_test_font_exist_match");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("JetBrainsMonoNerdFont-Regular.ttf"), b"fake").unwrap();
+        assert!(font_files_exist(&dir));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_font_files_exist_no_match_empty_dir() {
+        let dir = std::env::temp_dir().join("pnm_test_font_exist_empty");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(!font_files_exist(&dir));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_font_files_exist_wrong_prefix() {
+        let dir = std::env::temp_dir().join("pnm_test_font_exist_wrong");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("FiraCode-Regular.ttf"), b"fake").unwrap();
+        fs::write(dir.join("JetBrainsMono-Regular.ttf"), b"fake").unwrap(); // missing "Nerd"
+        assert!(!font_files_exist(&dir));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_font_files_exist_wrong_extension() {
+        let dir = std::env::temp_dir().join("pnm_test_font_exist_ext");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("JetBrainsMonoNerdFont-Regular.otf"), b"fake").unwrap();
+        assert!(!font_files_exist(&dir));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_font_files_exist_nonexistent_dir() {
+        let dir = std::env::temp_dir().join("pnm_test_font_exist_missing_dir");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!font_files_exist(&dir));
+    }
+
+    // ── remove_font_files tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_remove_font_files_deletes_matching() {
+        let dir = std::env::temp_dir().join("pnm_test_remove_match");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("JetBrainsMonoNerdFont-Regular.ttf"), b"fake").unwrap();
+        fs::write(dir.join("JetBrainsMonoNerdFont-Bold.ttf"), b"fake").unwrap();
+        fs::write(dir.join("JetBrainsMonoNerdFontMono-Regular.ttf"), b"fake").unwrap();
+
+        let removed = remove_font_files(&dir);
+        assert_eq!(removed, 3);
+        assert!(!font_files_exist(&dir));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_remove_font_files_ignores_non_font_files() {
+        let dir = std::env::temp_dir().join("pnm_test_remove_ignore");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Non-matching files that should survive
+        fs::write(dir.join("FiraCode-Regular.ttf"), b"keep").unwrap();
+        fs::write(dir.join("README.txt"), b"keep").unwrap();
+        fs::write(dir.join("JetBrainsMono-Regular.ttf"), b"keep").unwrap();
+
+        // Matching file that should be removed
+        fs::write(dir.join("JetBrainsMonoNerdFont-Regular.ttf"), b"remove").unwrap();
+
+        let removed = remove_font_files(&dir);
+        assert_eq!(removed, 1);
+
+        // Non-matching files still exist
+        assert!(dir.join("FiraCode-Regular.ttf").exists());
+        assert!(dir.join("README.txt").exists());
+        assert!(dir.join("JetBrainsMono-Regular.ttf").exists());
+        // Matching file is gone
+        assert!(!dir.join("JetBrainsMonoNerdFont-Regular.ttf").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_remove_font_files_empty_dir() {
+        let dir = std::env::temp_dir().join("pnm_test_remove_empty");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let removed = remove_font_files(&dir);
+        assert_eq!(removed, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_remove_font_files_nonexistent_dir() {
+        let dir = std::env::temp_dir().join("pnm_test_remove_missing_dir");
+        let _ = fs::remove_dir_all(&dir);
+
+        let removed = remove_font_files(&dir);
+        assert_eq!(removed, 0);
     }
 }
