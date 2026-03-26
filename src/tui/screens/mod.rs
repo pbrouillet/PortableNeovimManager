@@ -1,0 +1,12 @@
+pub mod instance_list;
+pub mod instance_detail;
+pub mod edit_features;
+pub mod edit_leader;
+pub mod settings;
+pub mod confirm_delete;
+pub mod tutorial;
+pub mod create;
+pub mod marketplace;
+pub mod monitor;
+pub mod init_config;
+pub mod terminal_font;

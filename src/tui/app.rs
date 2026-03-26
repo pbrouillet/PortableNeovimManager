@@ -2,7 +2,7 @@ use std::io::{self, stdout};
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -11,53 +11,14 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use crate::config::{self, GlobalSettings, InstanceManifest, LEADER_KEY_OPTIONS};
 use crate::workload::WorkloadRegistry;
 
+use super::menu::bar::MenuBar;
+use super::menu::definitions::build_menu_bar;
+use super::state::{
+    LayoutCache, Screen, FeatureCheckbox, WorkloadCheckbox, FeatureCursorItem, TerminalProfileEntry,
+};
 use super::ui;
 
-// ── Screen ──────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-pub enum Screen {
-    InstanceList,
-    InstanceDetail { name: String },
-    EditFeatures { name: String },
-    EditLeaderKey { name: String },
-    ConfirmDelete { name: String },
-    EditSettings,
-    TutorialList,
-    TutorialView { title: String, content: String },
-    Marketplace { instance_name: String },
-    CreateInstance,
-}
-
 // ── App state ───────────────────────────────────────────────────────────────
-
-/// A single feature checkbox within a workload.
-#[derive(Clone, Debug)]
-pub struct FeatureCheckbox {
-    pub name: String,
-    pub enabled: bool,
-}
-
-/// A workload group in the EditFeatures screen.
-#[derive(Clone, Debug)]
-pub struct WorkloadCheckbox {
-    pub workload_id: String,
-    pub name: String,
-    pub description: String,
-    pub category: Option<String>,
-    pub enabled: bool,
-    pub expanded: bool,
-    pub features: Vec<FeatureCheckbox>,
-}
-
-/// An item the cursor can land on in the feature list.
-#[derive(Clone, Debug)]
-pub enum FeatureCursorItem {
-    AllToggle,
-    GroupHeader(String),
-    Workload(usize),
-    Feature(usize, usize),
-}
 
 pub struct App {
     pub instances: Vec<InstanceManifest>,
@@ -127,6 +88,48 @@ pub struct App {
     pub create_preset_cursor: usize,
     /// Validation error message for the create form
     pub create_error: Option<String>,
+    /// Cached memory snapshot for the Monitor screen
+    pub monitor_snapshot: Option<crate::monitor::InstanceMemorySnapshot>,
+    /// Error message when monitoring fails
+    pub monitor_error: Option<String>,
+    /// Tick counter for live refresh (refreshes every N ticks)
+    pub monitor_tick: u8,
+    /// Init config: focused panel (0 = pre, 1 = post)
+    pub(crate) init_config_panel: usize,
+    /// Init config: scroll offset for pre-plugins panel
+    pub(crate) init_config_pre_scroll: u16,
+    /// Init config: scroll offset for post-plugins panel
+    pub(crate) init_config_post_scroll: u16,
+    /// Init config: whether we're in edit mode
+    pub(crate) init_config_editing: bool,
+    /// Init config: editor buffer (lines)
+    pub(crate) init_config_buffer: Vec<String>,
+    /// Init config: editor cursor row
+    pub(crate) init_config_cursor_row: usize,
+    /// Init config: editor cursor col
+    pub(crate) init_config_cursor_col: usize,
+    /// Init config: editor scroll offset
+    pub(crate) init_config_editor_scroll: u16,
+    /// Init config: undo stack (buffer snapshot, row, col)
+    pub(crate) init_config_undo: Vec<(Vec<String>, usize, usize)>,
+    /// Init config: redo stack
+    pub(crate) init_config_redo: Vec<(Vec<String>, usize, usize)>,
+    /// Init config: buffer snapshot at edit start (for dirty detection)
+    pub(crate) init_config_original_buffer: Vec<String>,
+    /// Init config: whether the buffer has unsaved changes
+    pub(crate) init_config_dirty: bool,
+    /// Init config: whether we're showing the "discard changes?" prompt
+    pub(crate) init_config_confirm_discard: bool,
+    /// Terminal font config: profile entries from discovered installations
+    pub(crate) terminal_entries: Vec<TerminalProfileEntry>,
+    /// Terminal font config: cursor position
+    pub(crate) terminal_cursor: usize,
+    /// Terminal font config: whether "apply to all profiles (defaults)" is toggled
+    pub(crate) terminal_apply_defaults: bool,
+    /// Menu bar widget with pulldown menus
+    pub menu_bar: MenuBar,
+    /// Cached widget positions from last draw for mouse hit testing
+    pub layout_cache: LayoutCache,
 }
 
 impl App {
@@ -171,6 +174,27 @@ impl App {
             create_field_cursor: 0,
             create_preset_cursor: 1, // default to ide-core
             create_error: None,
+            monitor_snapshot: None,
+            monitor_error: None,
+            monitor_tick: 0,
+            init_config_panel: 0,
+            init_config_pre_scroll: 0,
+            init_config_post_scroll: 0,
+            init_config_editing: false,
+            init_config_buffer: vec![String::new()],
+            init_config_cursor_row: 0,
+            init_config_cursor_col: 0,
+            init_config_editor_scroll: 0,
+            init_config_undo: Vec::new(),
+            init_config_redo: Vec::new(),
+            init_config_original_buffer: vec![String::new()],
+            init_config_dirty: false,
+            init_config_confirm_discard: false,
+            terminal_entries: Vec::new(),
+            terminal_cursor: 0,
+            terminal_apply_defaults: true,
+            menu_bar: MenuBar::new(build_menu_bar()),
+            layout_cache: LayoutCache::default(),
         }
     }
 
@@ -203,7 +227,238 @@ impl App {
         }
     }
 
-    fn refresh_instances(&mut self) {
+    /// Dispatch a high-level command from the menu bar or function bar.
+    /// Returns without action if the command doesn't apply to the current screen.
+    async fn dispatch(
+        &mut self,
+        cmd: super::command::Command,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) {
+        use super::command::Command as C;
+        match cmd {
+            C::Quit => self.should_quit = true,
+            C::Back => match &self.screen {
+                Screen::InstanceList => self.should_quit = true,
+                Screen::InstanceDetail { .. } => {
+                    self.screen = Screen::InstanceList;
+                    self.message = None;
+                }
+                Screen::EditFeatures { name } => {
+                    let n = name.clone();
+                    self.screen = Screen::InstanceDetail { name: n };
+                    self.message = None;
+                }
+                Screen::TutorialList | Screen::TutorialView { .. } => self.tutorial_return(),
+                _ => {
+                    self.screen = Screen::InstanceList;
+                    self.message = None;
+                }
+            },
+            C::CreateInstance => self.enter_create_instance(),
+            C::LaunchInstance => {
+                if let Some(name) = self.current_instance_name() {
+                    do_launch(&name, self, terminal);
+                }
+            }
+            C::UpdateInstance => {
+                if let Some(name) = self.current_instance_name() {
+                    do_update(&name, self, terminal).await;
+                }
+            }
+            C::DeleteInstance => {
+                if let Some(name) = self.current_instance_name() {
+                    self.screen = Screen::ConfirmDelete { name };
+                    self.message = None;
+                }
+            }
+            C::EditFeatures => {
+                if let Some(name) = self.current_instance_name() {
+                    self.enter_edit_features(&name);
+                }
+            }
+            C::EditLeaderKey => {
+                if let Some(name) = self.current_instance_name() {
+                    self.enter_edit_leader(&name);
+                }
+            }
+            C::OpenSettings => {
+                self.settings_cursor = 0;
+                self.settings_editing = false;
+                self.settings_edit_buffer.clear();
+                self.screen = Screen::EditSettings;
+                self.message = None;
+            }
+            C::OpenTutorials => {
+                let current = self.screen.clone();
+                self.open_tutorial_list(current);
+            }
+            C::OpenMarketplace => {
+                if let Some(name) = self.current_instance_name() {
+                    self.enter_marketplace(&name);
+                }
+            }
+            C::OpenMonitor => {
+                if let Some(name) = self.current_instance_name() {
+                    self.enter_monitor(&name);
+                }
+            }
+            C::OpenInitConfig => {
+                if let Some(name) = self.current_instance_name() {
+                    self.enter_init_config(&name);
+                }
+            }
+            C::OpenTerminalFont => {
+                let installations = crate::font::find_terminals();
+                if !installations.is_empty() {
+                    self.enter_configure_terminal_font(installations);
+                } else {
+                    self.message = Some("No supported terminals found.".to_string());
+                }
+            }
+            C::InstallNerdFont => {
+                do_install_font(self, terminal).await;
+            }
+            C::Refresh => {
+                self.refresh_instances();
+                self.message = Some("Refreshed instance list.".to_string());
+            }
+            C::ActivateMenuBar => {
+                self.menu_bar.state.is_active = true;
+                self.menu_bar.state.is_dropped = false;
+            }
+            // Navigation and toggle commands are handled by per-screen key handlers
+            _ => {}
+        }
+    }
+
+    /// Get the instance name relevant to the current screen context.
+    fn current_instance_name(&self) -> Option<String> {
+        match &self.screen {
+            Screen::InstanceList => self.selected_name(),
+            Screen::InstanceDetail { name }
+            | Screen::EditFeatures { name }
+            | Screen::EditLeaderKey { name }
+            | Screen::ConfirmDelete { name }
+            | Screen::Marketplace { instance_name: name }
+            | Screen::Monitor { name }
+            | Screen::InitConfig { name } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Handle scroll wheel: move cursor up/down in the current list.
+    fn handle_scroll(&mut self, delta: i32) {
+        match &self.screen {
+            Screen::InstanceList => {
+                let len = self.instance_filtered.len();
+                if len > 0 {
+                    if delta > 0 {
+                        self.selected = (self.selected + 1).min(len - 1);
+                    } else if self.selected > 0 {
+                        self.selected -= 1;
+                    }
+                }
+            }
+            Screen::EditFeatures { .. } => {
+                let len = self.visible_feature_items().len();
+                if len > 0 {
+                    if delta > 0 {
+                        self.feature_cursor = (self.feature_cursor + 1).min(len - 1);
+                    } else if self.feature_cursor > 0 {
+                        self.feature_cursor -= 1;
+                    }
+                }
+            }
+            Screen::Marketplace { .. } => {
+                let len = self.marketplace_packages.len();
+                if len > 0 {
+                    if delta > 0 {
+                        self.marketplace_cursor = (self.marketplace_cursor + 1).min(len - 1);
+                    } else if self.marketplace_cursor > 0 {
+                        self.marketplace_cursor -= 1;
+                    }
+                }
+            }
+            Screen::TutorialList => {
+                let len = self.tutorial_filtered.len();
+                if len > 0 {
+                    if delta > 0 {
+                        self.tutorial_cursor = (self.tutorial_cursor + 1).min(len - 1);
+                    } else if self.tutorial_cursor > 0 {
+                        self.tutorial_cursor -= 1;
+                    }
+                }
+            }
+            Screen::TutorialView { .. } => {
+                if delta > 0 {
+                    self.tutorial_scroll = self.tutorial_scroll.saturating_add(3);
+                } else {
+                    self.tutorial_scroll = self.tutorial_scroll.saturating_sub(3);
+                }
+            }
+            Screen::EditSettings => {
+                // settings has a small fixed list
+                let len = 3; // root_dir, auto_update, auto_cleanup
+                if delta > 0 {
+                    self.settings_cursor = (self.settings_cursor + 1).min(len - 1);
+                } else if self.settings_cursor > 0 {
+                    self.settings_cursor -= 1;
+                }
+            }
+            Screen::ConfigureTerminalFont => {
+                let len = self.terminal_entries.len();
+                if len > 0 {
+                    if delta > 0 {
+                        self.terminal_cursor = (self.terminal_cursor + 1).min(len - 1);
+                    } else if self.terminal_cursor > 0 {
+                        self.terminal_cursor -= 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle a mouse click on the content area using the layout cache.
+    fn handle_click(&mut self, pos: ratatui::layout::Position) {
+        // Check cached list item positions
+        for &(rect, idx) in &self.layout_cache.list_items {
+            if rect.contains(pos) {
+                match &self.screen {
+                    Screen::InstanceList => {
+                        if idx < self.instance_filtered.len() {
+                            self.selected = idx;
+                        }
+                    }
+                    Screen::EditFeatures { .. } => {
+                        let len = self.visible_feature_items().len();
+                        if idx < len {
+                            self.feature_cursor = idx;
+                        }
+                    }
+                    Screen::Marketplace { .. } => {
+                        if idx < self.marketplace_packages.len() {
+                            self.marketplace_cursor = idx;
+                        }
+                    }
+                    Screen::TutorialList => {
+                        if idx < self.tutorial_filtered.len() {
+                            self.tutorial_cursor = idx;
+                        }
+                    }
+                    Screen::ConfigureTerminalFont => {
+                        if idx < self.terminal_entries.len() {
+                            self.terminal_cursor = idx;
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn refresh_instances(&mut self) {
         self.instances = load_instances(&self.settings);
         self.update_instance_filter();
         if self.selected >= self.instance_filtered.len() && !self.instance_filtered.is_empty() {
@@ -214,14 +469,14 @@ impl App {
         }
     }
 
-    fn selected_name(&self) -> Option<String> {
+    pub(crate) fn selected_name(&self) -> Option<String> {
         self.instance_filtered
             .get(self.selected)
             .and_then(|&idx| self.instances.get(idx))
             .map(|i| i.name.clone())
     }
 
-    fn open_tutorial_list(&mut self, return_to: Screen) {
+    pub(crate) fn open_tutorial_list(&mut self, return_to: Screen) {
         self.tutorial_return_screen = Some(Box::new(return_to));
         self.tutorial_cursor = 0;
         self.tutorial_search.clear();
@@ -231,13 +486,13 @@ impl App {
         self.message = None;
     }
 
-    fn open_tutorial_view(&mut self, title: String, content: String, return_to: Screen) {
+    pub(crate) fn open_tutorial_view(&mut self, title: String, content: String, return_to: Screen) {
         self.tutorial_return_screen = Some(Box::new(return_to));
         self.tutorial_scroll = 0;
         self.screen = Screen::TutorialView { title, content };
     }
 
-    fn tutorial_return(&mut self) {
+    pub(crate) fn tutorial_return(&mut self) {
         if let Some(screen) = self.tutorial_return_screen.take() {
             self.screen = *screen;
         } else {
@@ -246,7 +501,7 @@ impl App {
         self.message = None;
     }
 
-    fn update_tutorial_filter(&mut self) {
+    pub(crate) fn update_tutorial_filter(&mut self) {
         let query = self.tutorial_search.to_lowercase();
         if query.is_empty() {
             self.tutorial_filtered = (0..self.tutorial_topics.len()).collect();
@@ -267,7 +522,7 @@ impl App {
         }
     }
 
-    fn update_instance_filter(&mut self) {
+    pub(crate) fn update_instance_filter(&mut self) {
         let query = self.instance_search.to_lowercase();
         if query.is_empty() {
             self.instance_filtered = (0..self.instances.len()).collect();
@@ -327,7 +582,7 @@ impl App {
         items
     }
 
-    fn enter_edit_features(&mut self, name: &str) {
+    pub(crate) fn enter_edit_features(&mut self, name: &str) {
         let instance = self.instances.iter().find(|i| i.name == name);
         let enabled_workloads = instance.map(|i| &i.workloads);
 
@@ -381,7 +636,7 @@ impl App {
         self.message = None;
     }
 
-    fn toggle_feature(&mut self) {
+    pub(crate) fn toggle_feature(&mut self) {
         let items = self.visible_feature_items();
         let Some(item) = items.get(self.feature_cursor) else {
             return;
@@ -455,14 +710,14 @@ impl App {
         }
     }
 
-    fn toggle_expand(&mut self) {
+    pub(crate) fn toggle_expand(&mut self) {
         let items = self.visible_feature_items();
         if let Some(FeatureCursorItem::Workload(wi)) = items.get(self.feature_cursor) {
             self.workload_checkboxes[*wi].expanded = !self.workload_checkboxes[*wi].expanded;
         }
     }
 
-    fn apply_features(&mut self, name: &str) {
+    pub(crate) fn apply_features(&mut self, name: &str) {
         let features: Vec<String> = self
             .workload_checkboxes
             .iter()
@@ -481,7 +736,7 @@ impl App {
         }
     }
 
-    fn enter_edit_leader(&mut self, name: &str) {
+    pub(crate) fn enter_edit_leader(&mut self, name: &str) {
         let instance = self.instances.iter().find(|i| i.name == name);
         let current_key = instance.map(|i| i.leader_key.as_str()).unwrap_or(" ");
 
@@ -496,7 +751,7 @@ impl App {
         self.message = None;
     }
 
-    fn apply_leader_key(&mut self, name: &str) {
+    pub(crate) fn apply_leader_key(&mut self, name: &str) {
         let Some((key_value, _)) = LEADER_KEY_OPTIONS.get(self.leader_cursor) else {
             self.message = Some("Invalid leader key selection.".to_string());
             return;
@@ -518,6 +773,8 @@ impl App {
                     &manifest.workloads,
                     &manifest.leader_key,
                     &manifest.mason_packages,
+                    manifest.init_lua_pre.as_deref(),
+                    manifest.init_lua_post.as_deref(),
                 );
                 let init_lua_path = base.join("config").join("nvim").join("init.lua");
 
@@ -542,7 +799,7 @@ impl App {
         }
     }
 
-    fn enter_marketplace(&mut self, instance_name: &str) {
+    pub(crate) fn enter_marketplace(&mut self, instance_name: &str) {
         let dir = config::instance_dir(&self.settings, instance_name);
         let manifest_path = InstanceManifest::manifest_path(&dir);
         self.marketplace_installed = InstanceManifest::load(&manifest_path)
@@ -572,7 +829,7 @@ impl App {
         self.message = None;
     }
 
-    fn enter_create_instance(&mut self) {
+    pub(crate) fn enter_create_instance(&mut self) {
         self.create_name.clear();
         self.create_field_cursor = 0;
         self.create_preset_cursor = 1; // default to ide-core
@@ -581,7 +838,75 @@ impl App {
         self.message = None;
     }
 
-    fn update_marketplace_filter(&mut self) {
+    pub(crate) fn enter_monitor(&mut self, instance_name: &str) {
+        self.monitor_snapshot = None;
+        self.monitor_error = None;
+        self.monitor_tick = 0;
+        self.refresh_monitor(instance_name);
+        self.screen = Screen::Monitor {
+            name: instance_name.to_string(),
+        };
+        self.message = None;
+    }
+
+    pub(crate) fn refresh_monitor(&mut self, instance_name: &str) {
+        let dir = config::instance_dir(&self.settings, instance_name);
+        let nvim_binary = crate::neovim::find_nvim_binary(&dir).ok();
+        match crate::monitor::full_snapshot(&dir, nvim_binary.as_deref()) {
+            Ok(snap) => {
+                self.monitor_snapshot = Some(snap);
+                self.monitor_error = None;
+            }
+            Err(e) => {
+                self.monitor_snapshot = None;
+                self.monitor_error = Some(e.to_string());
+            }
+        }
+    }
+
+    pub(crate) fn enter_init_config(&mut self, name: &str) {
+        self.init_config_panel = 0;
+        self.init_config_pre_scroll = 0;
+        self.init_config_post_scroll = 0;
+        self.screen = Screen::InitConfig { name: name.to_string() };
+        self.message = None;
+    }
+
+    pub fn enter_configure_terminal_font(
+        &mut self,
+        installations: Vec<crate::font::TerminalInstallation>,
+    ) {
+        let mut entries = Vec::new();
+        for install in &installations {
+            for profile in &install.profiles {
+                entries.push(TerminalProfileEntry {
+                    kind: install.kind.clone(),
+                    install_label: install.label.clone(),
+                    config_path: install.config_path.clone(),
+                    profile_id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    current_font: profile.current_font.clone(),
+                    selected: false,
+                    supports_defaults: install.supports_defaults,
+                    read_only: install.read_only,
+                });
+            }
+        }
+        // Default to "apply to defaults" if any installation supports it and
+        // doesn't already have the font set
+        self.terminal_apply_defaults = installations
+            .iter()
+            .any(|i| {
+                i.supports_defaults
+                    && i.defaults_font.as_deref() != Some(crate::font::NERD_FONT_FACE)
+            });
+        self.terminal_entries = entries;
+        self.terminal_cursor = 0;
+        self.screen = Screen::ConfigureTerminalFont;
+        self.message = None;
+    }
+
+    pub(crate) fn update_marketplace_filter(&mut self) {
         let Some(ref reg) = self.marketplace_registry else {
             self.marketplace_packages = Vec::new();
             return;
@@ -618,7 +943,7 @@ impl App {
         }
     }
 
-    fn marketplace_toggle_selected(&mut self) {
+    pub(crate) fn marketplace_toggle_selected(&mut self) {
         let Some(ref reg) = self.marketplace_registry else {
             return;
         };
@@ -632,7 +957,7 @@ impl App {
         }
     }
 
-    fn marketplace_apply(&mut self, instance_name: &str) -> Result<usize, String> {
+    pub(crate) fn marketplace_apply(&mut self, instance_name: &str) -> Result<usize, String> {
         if self.marketplace_selected.is_empty() {
             return Ok(0);
         }
@@ -664,6 +989,8 @@ impl App {
                 &manifest.extra_features,
                 &manifest.leader_key,
                 &manifest.mason_packages,
+                manifest.init_lua_pre.as_deref(),
+                manifest.init_lua_post.as_deref(),
             );
             let init_lua_path = dir.join("config").join("nvim").join("init.lua");
             std::fs::write(&init_lua_path, init_lua)
@@ -679,7 +1006,7 @@ impl App {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn load_instances(settings: &GlobalSettings) -> Vec<InstanceManifest> {
+pub(crate) fn load_instances(settings: &GlobalSettings) -> Vec<InstanceManifest> {
     let dir = config::instances_dir(settings);
     if !dir.is_dir() {
         return Vec::new();
@@ -702,13 +1029,13 @@ fn load_instances(settings: &GlobalSettings) -> Vec<InstanceManifest> {
 
 /// Leave the alternate screen so an external command can use the terminal,
 /// then re-enter afterwards.
-fn leave_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+pub(crate) fn leave_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = disable_raw_mode();
     let _ = execute!(stdout(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
 }
 
-fn enter_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+pub(crate) fn enter_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let _ = enable_raw_mode();
     let _ = execute!(stdout(), EnterAlternateScreen);
     let _ = terminal.hide_cursor();
@@ -719,7 +1046,11 @@ fn enter_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
 
 pub async fn run(settings: GlobalSettings) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
+    execute!(
+        stdout(),
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
 
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -730,16 +1061,57 @@ pub async fn run(settings: GlobalSettings) -> Result<(), Box<dyn std::error::Err
     let mut app = App::new(instances, registry, settings);
 
     while !app.should_quit {
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        terminal.draw(|frame| ui::draw(frame, &mut app))?;
 
         if event::poll(Duration::from_millis(200))? {
             let ev = event::read()?;
             match ev {
                 Event::Resize(_, _) => {
                     app.clamp_cursors();
-                    continue; // redraw immediately with new size
+                    continue;
+                }
+                Event::Mouse(mouse) => {
+                    use crossterm::event::{MouseEventKind, MouseButton};
+                    // Menu bar gets first crack at mouse events
+                    if let Some(cmd) = app.menu_bar.handle_mouse(mouse) {
+                        app.dispatch(cmd, &mut terminal).await;
+                        continue;
+                    }
+
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            app.handle_scroll(-1);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.handle_scroll(1);
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+                            app.handle_click(pos);
+                        }
+                        _ => {}
+                    }
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // F10 / F9 toggle menu bar
+                    if matches!(key.code, KeyCode::F(10) | KeyCode::F(9)) && !app.menu_bar.is_active() {
+                        app.menu_bar.state.is_active = true;
+                        app.menu_bar.state.is_dropped = false;
+                        continue;
+                    }
+
+                    // Menu bar gets first crack at key events when active (or Alt+letter)
+                    if app.menu_bar.is_active() || key.modifiers.contains(KeyModifiers::ALT) {
+                        if let Some(cmd) = app.menu_bar.handle_key(key.code, key.modifiers) {
+                            app.dispatch(cmd, &mut terminal).await;
+                            continue;
+                        }
+                        if app.menu_bar.is_active() {
+                            continue; // menu consumed the key (navigation)
+                        }
+                    }
+
+                    // Screen-specific key handlers (unchanged)
                     match &app.screen {
                         Screen::InstanceList => {
                             handle_list_keys(&mut app, key.code, &mut terminal).await;
@@ -776,15 +1148,39 @@ pub async fn run(settings: GlobalSettings) -> Result<(), Box<dyn std::error::Err
                         Screen::CreateInstance => {
                             handle_create_keys(&mut app, key.code, &mut terminal).await;
                         }
+                        Screen::Monitor { name } => {
+                            let name = name.clone();
+                            handle_monitor_keys(&mut app, key.code, &name);
+                        }
+                        Screen::InitConfig { name } => {
+                            let name = name.clone();
+                            handle_init_config_keys(&mut app, key, &name);
+                        }
+                        Screen::ConfigureTerminalFont => {
+                            handle_configure_terminal_font_keys(&mut app, key.code);
+                        }
                     }
                 }
                 _ => {}
             }
         }
+
+        // Auto-refresh monitor screen every ~2 seconds (10 ticks × 200ms)
+        if let Screen::Monitor { ref name } = app.screen {
+            app.monitor_tick = app.monitor_tick.wrapping_add(1);
+            if app.monitor_tick % 10 == 0 {
+                let name = name.clone();
+                app.refresh_monitor(&name);
+            }
+        }
     }
 
     disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen)?;
+    execute!(
+        stdout(),
+        LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -796,83 +1192,7 @@ async fn handle_list_keys(
     code: KeyCode,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) {
-    // Handle search input mode
-    if app.instance_search_active {
-        match code {
-            KeyCode::Esc => {
-                app.instance_search_active = false;
-                app.instance_search.clear();
-                app.update_instance_filter();
-            }
-            KeyCode::Enter => {
-                app.instance_search_active = false;
-            }
-            KeyCode::Backspace => {
-                app.instance_search.pop();
-                app.update_instance_filter();
-            }
-            KeyCode::Char(c) => {
-                app.instance_search.push(c);
-                app.update_instance_filter();
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    match code {
-        KeyCode::Char('q') | KeyCode::Esc => {
-            app.should_quit = true;
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if !app.instance_filtered.is_empty() {
-                app.selected = (app.selected + 1) % app.instance_filtered.len();
-            }
-            app.message = None;
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if !app.instance_filtered.is_empty() {
-                app.selected = if app.selected == 0 {
-                    app.instance_filtered.len() - 1
-                } else {
-                    app.selected - 1
-                };
-            }
-            app.message = None;
-        }
-        KeyCode::Enter => {
-            if let Some(name) = app.selected_name() {
-                app.screen = Screen::InstanceDetail { name };
-                app.message = None;
-            }
-        }
-        KeyCode::Char('c') => {
-            app.enter_create_instance();
-        }
-        KeyCode::Char('r') => {
-            app.refresh_instances();
-            app.message = Some("Refreshed instance list.".to_string());
-        }
-        KeyCode::Char('n') => {
-            do_install_font(app, terminal).await;
-        }
-        KeyCode::Char('s') => {
-            app.settings_cursor = 0;
-            app.settings_editing = false;
-            app.settings_edit_buffer.clear();
-            app.screen = Screen::EditSettings;
-            app.message = None;
-        }
-        KeyCode::Char('t') => {
-            app.open_tutorial_list(Screen::InstanceList);
-        }
-        KeyCode::Char('/') => {
-            app.instance_search_active = true;
-            app.instance_search.clear();
-            app.message = None;
-        }
-        _ => {}
-    }
+    crate::tui::screens::instance_list::handle_keys(app, code, terminal).await;
 }
 
 async fn handle_detail_keys(
@@ -881,482 +1201,35 @@ async fn handle_detail_keys(
     name: &str,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) {
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.screen = Screen::InstanceList;
-            app.message = None;
-        }
-        KeyCode::Char('l') => {
-            do_launch(name, app, terminal);
-        }
-        KeyCode::Char('u') => {
-            do_update(name, app, terminal).await;
-        }
-        KeyCode::Char('d') => {
-            app.screen = Screen::ConfirmDelete { name: name.to_string() };
-            app.message = None;
-        }
-        KeyCode::Char('f') => {
-            app.enter_edit_features(name);
-        }
-        KeyCode::Char('m') => {
-            app.enter_edit_leader(name);
-        }
-        KeyCode::Char('o') => {
-            open_instance_dir(name, app);
-        }
-        KeyCode::Char('t') => {
-            app.open_tutorial_list(Screen::InstanceDetail { name: name.to_string() });
-        }
-        KeyCode::Char('p') => {
-            app.enter_marketplace(name);
-        }
-        _ => {}
-    }
+    crate::tui::screens::instance_detail::handle_keys(app, code, name, terminal).await;
 }
 
 fn handle_features_keys(app: &mut App, code: KeyCode, name: &str) {
-    let visible_count = app.visible_feature_items().len();
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.screen = Screen::InstanceDetail {
-                name: name.to_string(),
-            };
-            app.message = None;
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if visible_count > 0 {
-                app.feature_cursor = (app.feature_cursor + 1) % visible_count;
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if visible_count > 0 {
-                app.feature_cursor = if app.feature_cursor == 0 {
-                    visible_count - 1
-                } else {
-                    app.feature_cursor - 1
-                };
-            }
-        }
-        KeyCode::Char(' ') => {
-            app.toggle_feature();
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            app.toggle_expand();
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            // Collapse: if on a feature, jump to its parent; if on workload, collapse it
-            let items = app.visible_feature_items();
-            if let Some(item) = items.get(app.feature_cursor) {
-                match item {
-                    FeatureCursorItem::AllToggle | FeatureCursorItem::GroupHeader(_) => {
-                        // No-op
-                    }
-                    FeatureCursorItem::Feature(wi, _) => {
-                        // Jump cursor to the parent workload
-                        let wi = *wi;
-                        if let Some(pos) = items.iter().position(|i| matches!(i, FeatureCursorItem::Workload(w) if *w == wi)) {
-                            app.feature_cursor = pos;
-                        }
-                    }
-                    FeatureCursorItem::Workload(wi) => {
-                        app.workload_checkboxes[*wi].expanded = false;
-                    }
-                }
-            }
-        }
-        KeyCode::Enter => {
-            app.apply_features(name);
-            app.screen = Screen::InstanceDetail {
-                name: name.to_string(),
-            };
-        }
-        KeyCode::Char('t') => {
-            let items = app.visible_feature_items();
-            if let Some(FeatureCursorItem::Workload(wi)) = items.get(app.feature_cursor) {
-                let workload_id = &app.workload_checkboxes[*wi].workload_id;
-                if let Some((title, content)) = app.registry.tutorial_content(workload_id) {
-                    let return_to = Screen::EditFeatures { name: name.to_string() };
-                    app.open_tutorial_view(title, content, return_to);
-                } else {
-                    app.message = Some("No tutorial available for this workload.".to_string());
-                }
-            }
-        }
-        _ => {}
-    }
+    crate::tui::screens::edit_features::handle_keys(app, code, name);
 }
 
 fn handle_leader_keys(app: &mut App, code: KeyCode, name: &str) {
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.screen = Screen::InstanceDetail {
-                name: name.to_string(),
-            };
-            app.message = None;
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.leader_cursor = (app.leader_cursor + 1) % LEADER_KEY_OPTIONS.len();
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.leader_cursor = if app.leader_cursor == 0 {
-                LEADER_KEY_OPTIONS.len() - 1
-            } else {
-                app.leader_cursor - 1
-            };
-        }
-        KeyCode::Enter => {
-            app.apply_leader_key(name);
-            app.screen = Screen::InstanceDetail {
-                name: name.to_string(),
-            };
-        }
-        _ => {}
-    }
+    crate::tui::screens::edit_leader::handle_keys(app, code, name);
 }
 
-/// Settings fields: instances_dir, default_leader_key, confirm_destructive
-const SETTINGS_FIELD_COUNT: usize = 3;
-
 fn handle_settings_keys(app: &mut App, code: KeyCode) {
-    if app.settings_editing {
-        match code {
-            KeyCode::Esc => {
-                app.settings_editing = false;
-                app.settings_edit_buffer.clear();
-            }
-            KeyCode::Enter => {
-                // Apply the edit
-                match app.settings_cursor {
-                    0 => {
-                        // instances_dir
-                        let new_path = std::path::PathBuf::from(&app.settings_edit_buffer);
-                        if app.settings_edit_buffer.is_empty() {
-                            app.message = Some("Path cannot be empty.".to_string());
-                        } else {
-                            app.settings.instances_dir = new_path;
-                            app.message = Some("Instances directory updated.".to_string());
-                        }
-                    }
-                    1 => {
-                        // default_leader_key — validate against allowed keys
-                        let key = &app.settings_edit_buffer;
-                        if LEADER_KEY_OPTIONS.iter().any(|(v, _)| *v == key.as_str()) {
-                            app.settings.default_leader_key = key.clone();
-                            app.message = Some(format!(
-                                "Default leader key set to '{}'.",
-                                config::leader_key_display(key)
-                            ));
-                        } else {
-                            app.message = Some("Invalid leader key. Use Space, comma, backslash, or semicolon.".to_string());
-                        }
-                    }
-                    2 => {
-                        // confirm_destructive — toggle handled separately
-                    }
-                    _ => {}
-                }
-                app.settings_editing = false;
-                app.settings_edit_buffer.clear();
-
-                // Save settings
-                if let Err(e) = config::save_global_settings(&app.settings) {
-                    app.message = Some(format!("Failed to save settings: {e}"));
-                }
-            }
-            KeyCode::Backspace => {
-                app.settings_edit_buffer.pop();
-            }
-            KeyCode::Char(c) => {
-                app.settings_edit_buffer.push(c);
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.screen = Screen::InstanceList;
-            app.message = None;
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.settings_cursor = (app.settings_cursor + 1) % SETTINGS_FIELD_COUNT;
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.settings_cursor = if app.settings_cursor == 0 {
-                SETTINGS_FIELD_COUNT - 1
-            } else {
-                app.settings_cursor - 1
-            };
-        }
-        KeyCode::Enter => {
-            match app.settings_cursor {
-                0 => {
-                    // Edit instances_dir
-                    app.settings_editing = true;
-                    app.settings_edit_buffer = app.settings.instances_dir.to_string_lossy().to_string();
-                }
-                1 => {
-                    // Cycle through leader key options
-                    let current = &app.settings.default_leader_key;
-                    let idx = LEADER_KEY_OPTIONS
-                        .iter()
-                        .position(|(v, _)| *v == current.as_str())
-                        .unwrap_or(0);
-                    let next = (idx + 1) % LEADER_KEY_OPTIONS.len();
-                    app.settings.default_leader_key = LEADER_KEY_OPTIONS[next].0.to_string();
-                    app.message = Some(format!(
-                        "Default leader key: {}",
-                        config::leader_key_display(LEADER_KEY_OPTIONS[next].0)
-                    ));
-                    if let Err(e) = config::save_global_settings(&app.settings) {
-                        app.message = Some(format!("Failed to save: {e}"));
-                    }
-                }
-                2 => {
-                    // Toggle confirm_destructive
-                    app.settings.confirm_destructive = !app.settings.confirm_destructive;
-                    let state = if app.settings.confirm_destructive { "on" } else { "off" };
-                    app.message = Some(format!("Confirm destructive actions: {state}"));
-                    if let Err(e) = config::save_global_settings(&app.settings) {
-                        app.message = Some(format!("Failed to save: {e}"));
-                    }
-                }
-                _ => {}
-            }
-        }
-        KeyCode::Char(' ') if app.settings_cursor == 2 => {
-            // Quick toggle for boolean field
-            app.settings.confirm_destructive = !app.settings.confirm_destructive;
-            let state = if app.settings.confirm_destructive { "on" } else { "off" };
-            app.message = Some(format!("Confirm destructive actions: {state}"));
-            if let Err(e) = config::save_global_settings(&app.settings) {
-                app.message = Some(format!("Failed to save: {e}"));
-            }
-        }
-        _ => {}
-    }
+    crate::tui::screens::settings::handle_keys(app, code);
 }
 
 fn handle_tutorial_list_keys(app: &mut App, code: KeyCode) {
-    if app.tutorial_search_active {
-        match code {
-            KeyCode::Esc => {
-                app.tutorial_search_active = false;
-                app.tutorial_search.clear();
-                app.update_tutorial_filter();
-            }
-            KeyCode::Enter => {
-                app.tutorial_search_active = false;
-            }
-            KeyCode::Backspace => {
-                app.tutorial_search.pop();
-                app.update_tutorial_filter();
-            }
-            KeyCode::Char(c) => {
-                app.tutorial_search.push(c);
-                app.update_tutorial_filter();
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.tutorial_return();
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if !app.tutorial_filtered.is_empty() {
-                app.tutorial_cursor = (app.tutorial_cursor + 1) % app.tutorial_filtered.len();
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if !app.tutorial_filtered.is_empty() {
-                app.tutorial_cursor = if app.tutorial_cursor == 0 {
-                    app.tutorial_filtered.len() - 1
-                } else {
-                    app.tutorial_cursor - 1
-                };
-            }
-        }
-        KeyCode::Enter => {
-            if let Some(&topic_idx) = app.tutorial_filtered.get(app.tutorial_cursor) {
-                if let Some((id, _)) = app.tutorial_topics.get(topic_idx) {
-                    if let Some((title, content)) = app.registry.tutorial_content(id) {
-                        app.tutorial_scroll = 0;
-                        // Return to TutorialList (not the original caller) from the view
-                        app.tutorial_return_screen = Some(Box::new(Screen::TutorialList));
-                        app.screen = Screen::TutorialView { title, content };
-                    }
-                }
-            }
-        }
-        KeyCode::Char('/') => {
-            app.tutorial_search_active = true;
-        }
-        _ => {}
-    }
+    crate::tui::screens::tutorial::handle_list_keys(app, code);
 }
 
 fn handle_tutorial_view_keys(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.tutorial_return();
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.tutorial_scroll = app.tutorial_scroll.saturating_add(1);
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.tutorial_scroll = app.tutorial_scroll.saturating_sub(1);
-        }
-        KeyCode::PageDown | KeyCode::Char('d') => {
-            app.tutorial_scroll = app.tutorial_scroll.saturating_add(10);
-        }
-        KeyCode::PageUp | KeyCode::Char('u') => {
-            app.tutorial_scroll = app.tutorial_scroll.saturating_sub(10);
-        }
-        KeyCode::Home | KeyCode::Char('g') => {
-            app.tutorial_scroll = 0;
-        }
-        KeyCode::End | KeyCode::Char('G') => {
-            // Set to a large number; rendering will clamp
-            app.tutorial_scroll = usize::MAX;
-        }
-        _ => {}
-    }
+    crate::tui::screens::tutorial::handle_view_keys(app, code);
 }
 
 async fn handle_marketplace_keys(app: &mut App, code: KeyCode, instance_name: &str) {
-    if app.marketplace_search_active {
-        match code {
-            KeyCode::Esc => {
-                app.marketplace_search_active = false;
-                app.marketplace_search.clear();
-                app.update_marketplace_filter();
-            }
-            KeyCode::Enter => {
-                app.marketplace_search_active = false;
-            }
-            KeyCode::Backspace => {
-                app.marketplace_search.pop();
-                app.update_marketplace_filter();
-            }
-            KeyCode::Char(c) => {
-                app.marketplace_search.push(c);
-                app.update_marketplace_filter();
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.screen = Screen::InstanceDetail {
-                name: instance_name.to_string(),
-            };
-            app.message = None;
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if !app.marketplace_packages.is_empty() {
-                app.marketplace_cursor =
-                    (app.marketplace_cursor + 1) % app.marketplace_packages.len();
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if !app.marketplace_packages.is_empty() {
-                app.marketplace_cursor = if app.marketplace_cursor == 0 {
-                    app.marketplace_packages.len() - 1
-                } else {
-                    app.marketplace_cursor - 1
-                };
-            }
-        }
-        KeyCode::Char(' ') => {
-            app.marketplace_toggle_selected();
-        }
-        KeyCode::Tab => {
-            use crate::mason_registry::MasonCategory;
-            app.marketplace_category = match &app.marketplace_category {
-                Some(MasonCategory::Lsp) => Some(MasonCategory::Dap),
-                Some(MasonCategory::Dap) => Some(MasonCategory::Formatter),
-                Some(MasonCategory::Formatter) => Some(MasonCategory::Linter),
-                Some(MasonCategory::Linter) => None,
-                None | Some(_) => Some(MasonCategory::Lsp),
-            };
-            app.update_marketplace_filter();
-        }
-        KeyCode::BackTab => {
-            use crate::mason_registry::MasonCategory;
-            app.marketplace_category = match &app.marketplace_category {
-                Some(MasonCategory::Lsp) => None,
-                Some(MasonCategory::Dap) => Some(MasonCategory::Lsp),
-                Some(MasonCategory::Formatter) => Some(MasonCategory::Dap),
-                Some(MasonCategory::Linter) => Some(MasonCategory::Formatter),
-                None | Some(_) => Some(MasonCategory::Linter),
-            };
-            app.update_marketplace_filter();
-        }
-        KeyCode::Enter => match app.marketplace_apply(instance_name) {
-            Ok(0) => app.message = Some("No new packages to add.".to_string()),
-            Ok(n) => {
-                app.message = Some(format!("✓ Added {n} package(s). Launch to install."));
-                app.refresh_instances();
-            }
-            Err(e) => app.message = Some(format!("Error: {e}")),
-        },
-        KeyCode::Char('/') => {
-            app.marketplace_search_active = true;
-            app.marketplace_search.clear();
-            app.message = None;
-        }
-        KeyCode::Char('R') => {
-            app.marketplace_status = Some("Fetching registry from GitHub...".to_string());
-            match crate::mason_registry::fetch_registry(true).await {
-                Ok(reg) => {
-                    let count = reg.len();
-                    app.marketplace_registry = Some(reg);
-                    app.update_marketplace_filter();
-                    app.marketplace_status =
-                        Some(format!("✓ Registry refreshed. {count} packages."));
-                }
-                Err(e) => {
-                    app.marketplace_status = Some(format!("Error: {e}"));
-                }
-            }
-        }
-        _ => {}
-    }
+    crate::tui::screens::marketplace::handle_keys(app, code, instance_name).await;
 }
 
 fn handle_confirm_delete_keys(app: &mut App, code: KeyCode, name: &str) {
-    match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            match crate::instance::delete(name, &app.settings) {
-                Ok(()) => {
-                    app.refresh_instances();
-                    app.message = Some(format!("Deleted '{name}'."));
-                    app.screen = Screen::InstanceList;
-                }
-                Err(e) => {
-                    app.message = Some(format!("Delete failed: {e}"));
-                    app.screen = Screen::InstanceList;
-                }
-            }
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            app.message = Some("Delete cancelled.".to_string());
-            // Return to detail if we came from there, otherwise list
-            if app.instances.iter().any(|i| i.name == name) {
-                app.screen = Screen::InstanceDetail { name: name.to_string() };
-            } else {
-                app.screen = Screen::InstanceList;
-            }
-        }
-        _ => {}
-    }
+    crate::tui::screens::confirm_delete::handle_keys(app, code, name);
 }
 
 async fn handle_create_keys(
@@ -1364,128 +1237,87 @@ async fn handle_create_keys(
     code: KeyCode,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) {
-    // When on the name field (field 0), capture text input
-    if app.create_field_cursor == 0 {
-        match code {
-            KeyCode::Esc => {
-                app.screen = Screen::InstanceList;
-                app.message = None;
-                return;
-            }
-            KeyCode::Tab | KeyCode::Down => {
-                app.create_field_cursor = 1;
-                return;
-            }
-            KeyCode::Enter => {
-                // Fall through to the create logic below
-            }
-            KeyCode::Backspace => {
-                app.create_name.pop();
-                // Live validation
-                if !app.create_name.is_empty() {
-                    app.create_error = crate::cli::validate_instance_name(&app.create_name).err();
-                } else {
-                    app.create_error = None;
-                }
-                return;
-            }
-            KeyCode::Char(c) => {
-                app.create_name.push(c);
-                // Live validation
-                app.create_error = crate::cli::validate_instance_name(&app.create_name).err();
-                return;
-            }
-            _ => return,
-        }
-    }
+    crate::tui::screens::create::handle_keys(app, code, terminal).await;
+}
 
-    // When on the preset field (field 1)
-    if app.create_field_cursor == 1 && code != KeyCode::Enter {
-        match code {
-            KeyCode::Esc => {
-                app.screen = Screen::InstanceList;
-                app.message = None;
-                return;
-            }
-            KeyCode::Tab | KeyCode::Up | KeyCode::BackTab => {
-                app.create_field_cursor = 0;
-                return;
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                let count = app.registry.presets.len();
-                if count > 0 {
-                    app.create_preset_cursor = if app.create_preset_cursor == 0 {
-                        count - 1
-                    } else {
-                        app.create_preset_cursor - 1
-                    };
-                }
-                return;
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                let count = app.registry.presets.len();
-                if count > 0 {
-                    app.create_preset_cursor = (app.create_preset_cursor + 1) % count;
-                }
-                return;
-            }
-            _ => return,
-        }
-    }
+fn handle_monitor_keys(app: &mut App, code: KeyCode, name: &str) {
+    crate::tui::screens::monitor::handle_keys(app, code, name);
+}
 
-    // Enter pressed — attempt creation
-    if code == KeyCode::Enter {
-        if app.create_name.is_empty() {
-            app.create_error = Some("Name cannot be empty.".to_string());
-            app.create_field_cursor = 0;
-            return;
-        }
-        if let Err(e) = crate::cli::validate_instance_name(&app.create_name) {
-            app.create_error = Some(e);
-            app.create_field_cursor = 0;
-            return;
-        }
-
-        // Check if instance already exists
-        let instance_dir = config::instance_dir(&app.settings, &app.create_name);
-        if instance_dir.exists() {
-            app.create_error = Some(format!("Instance '{}' already exists.", app.create_name));
-            app.create_field_cursor = 0;
-            return;
-        }
-
-        // Resolve preset to feature list
-        let features = if let Some(preset) = app.registry.presets.get(app.create_preset_cursor) {
-            preset.workloads.clone()
-        } else {
-            Vec::new()
-        };
-
-        let name = app.create_name.clone();
-        leave_tui(terminal);
-        println!("Creating instance '{}' ...", name);
-
-        match crate::instance::create(&name, None, features, &app.registry, &app.settings).await {
-            Ok(()) => {
-                app.refresh_instances();
-                app.message = Some(format!("✓ Created instance '{name}'."));
-            }
-            Err(e) => {
-                eprintln!("Create failed: {e}");
-                app.message = Some(format!("Create failed: {e}"));
-            }
-        }
-
-        println!("\nPress Enter to return to TUI...");
-        let _ = std::io::stdin().read_line(&mut String::new());
-        enter_tui(terminal);
-        app.screen = Screen::InstanceList;
-    }
+fn handle_init_config_keys(app: &mut App, key: crossterm::event::KeyEvent, name: &str) {
+    crate::tui::screens::init_config::handle_keys(app, key, name);
 }
 
 // ── Operations ──────────────────────────────────────────────────────────────
 
-fn open_instance_dir(name: &str, app: &mut App) {
+pub(crate) fn toggle_bun_runtime(name: &str, app: &mut App) {
+    let dir = config::instance_dir(&app.settings, name);
+    let manifest_path = config::InstanceManifest::manifest_path(&dir);
+    let mut manifest = match config::InstanceManifest::load(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            app.message = Some(format!("Failed to load manifest: {e}"));
+            return;
+        }
+    };
+
+    let currently_bun = manifest
+        .js_runtime
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("bun"));
+
+    if currently_bun {
+        // Toggle off → revert to system Node
+        manifest.js_runtime = None;
+        manifest.updated_at = chrono::Utc::now();
+        if let Err(e) = manifest.save(&manifest_path) {
+            app.message = Some(format!("Failed to save: {e}"));
+            return;
+        }
+        // Update cached instance
+        if let Some(inst) = app.instances.iter_mut().find(|i| i.name == name) {
+            inst.js_runtime = None;
+        }
+        app.message = Some(format!("Disabled Bun for '{name}'. Using system Node."));
+    } else {
+        // Validate bun is available before enabling
+        if let Err(e) = crate::runtime::find_runtime_binary("bun") {
+            app.message = Some(format!("Cannot enable Bun: {e}"));
+            return;
+        }
+        manifest.js_runtime = Some("bun".to_string());
+        manifest.updated_at = chrono::Utc::now();
+        if let Err(e) = manifest.save(&manifest_path) {
+            app.message = Some(format!("Failed to save: {e}"));
+            return;
+        }
+        // Update cached instance
+        if let Some(inst) = app.instances.iter_mut().find(|i| i.name == name) {
+            inst.js_runtime = Some("bun".to_string());
+        }
+        app.message = Some(format!("Enabled Bun for '{name}'. Takes effect on next launch."));
+    }
+
+    // Regenerate init.lua so copilot/node_host_prog overrides are up to date
+    let data_dir = dir.join("data");
+    let init_lua = crate::plugins::generate_init_lua_full(
+        &data_dir,
+        &app.registry,
+        &manifest.workloads,
+        &manifest.disabled_features,
+        &manifest.extra_features,
+        &manifest.leader_key,
+        &manifest.mason_packages,
+        manifest.init_lua_pre.as_deref(),
+        manifest.init_lua_post.as_deref(),
+    );
+    let init_lua_path = dir.join("config").join("nvim").join("init.lua");
+    if let Err(e) = std::fs::write(&init_lua_path, init_lua) {
+        app.message = Some(format!("Failed to regenerate init.lua: {e}"));
+    }
+}
+
+pub(crate) fn open_instance_dir(name: &str, app: &mut App) {
     let dir = config::instance_dir(&app.settings, name);
     if !dir.exists() {
         app.message = Some(format!("Instance directory not found for '{name}'."));
@@ -1511,21 +1343,168 @@ fn open_instance_dir(name: &str, app: &mut App) {
     }
 }
 
-async fn do_install_font(app: &mut App, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-    leave_tui(terminal);
-    let msg = crate::font::install_nerd_font().await;
-    println!("{msg}");
-    println!("\nPress Enter to return to TUI...");
-    let _ = std::io::stdin().read_line(&mut String::new());
-    app.message = Some("Nerd Font install completed.".to_string());
-    enter_tui(terminal);
+fn handle_configure_terminal_font_keys(app: &mut App, code: KeyCode) {
+    crate::tui::screens::terminal_font::handle_keys(app, code);
 }
 
-fn do_launch(name: &str, app: &mut App, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+pub(crate) fn do_apply_terminal_font(app: &mut App) {
+    let font_face = crate::font::NERD_FONT_FACE;
+    let mut applied = Vec::new();
+    let mut errors = Vec::new();
+    let mut instructions = Vec::new();
+
+    // Collect read-only terminals for manual instructions
+    let read_only_kinds: std::collections::HashSet<_> = app
+        .terminal_entries
+        .iter()
+        .filter(|e| e.read_only)
+        .map(|e| e.install_label.clone())
+        .collect();
+    for label in &read_only_kinds {
+        instructions.push(format!("{label}: manual configuration required"));
+    }
+
+    if app.terminal_apply_defaults {
+        // Group by (kind, config_path) — apply defaults for each terminal installation
+        let mut seen = std::collections::HashSet::new();
+        for entry in &app.terminal_entries {
+            if entry.read_only {
+                continue;
+            }
+            let key = entry.config_path.clone();
+            if seen.insert(key) {
+                let install = crate::font::TerminalInstallation {
+                    kind: entry.kind.clone(),
+                    label: entry.install_label.clone(),
+                    config_path: entry.config_path.clone(),
+                    profiles: app
+                        .terminal_entries
+                        .iter()
+                        .filter(|e| e.config_path == entry.config_path)
+                        .map(|e| crate::font::TerminalProfile {
+                            id: e.profile_id.clone(),
+                            name: e.name.clone(),
+                            current_font: e.current_font.clone(),
+                        })
+                        .collect(),
+                    defaults_font: None,
+                    supports_defaults: entry.supports_defaults,
+                    read_only: false,
+                };
+                match crate::font::apply_terminal_font_to_defaults(&install, font_face) {
+                    Ok(()) => applied.push(format!("{} defaults", entry.install_label)),
+                    Err(e) => errors.push(format!("{}: {e}", entry.install_label)),
+                }
+            }
+        }
+    }
+
+    // Apply to individually selected profiles, grouped by config path
+    let selected: Vec<_> = app
+        .terminal_entries
+        .iter()
+        .filter(|e| e.selected && !e.read_only)
+        .cloned()
+        .collect();
+
+    if !selected.is_empty() {
+        let mut by_path: std::collections::HashMap<std::path::PathBuf, Vec<_>> =
+            std::collections::HashMap::new();
+        for entry in &selected {
+            by_path
+                .entry(entry.config_path.clone())
+                .or_default()
+                .push(entry.clone());
+        }
+
+        for (path, entries) in &by_path {
+            let first = &entries[0];
+            let profile_ids: Vec<String> = entries.iter().map(|e| e.profile_id.clone()).collect();
+            let install = crate::font::TerminalInstallation {
+                kind: first.kind.clone(),
+                label: first.install_label.clone(),
+                config_path: path.clone(),
+                profiles: entries
+                    .iter()
+                    .map(|e| crate::font::TerminalProfile {
+                        id: e.profile_id.clone(),
+                        name: e.name.clone(),
+                        current_font: e.current_font.clone(),
+                    })
+                    .collect(),
+                defaults_font: None,
+                supports_defaults: first.supports_defaults,
+                read_only: false,
+            };
+            match crate::font::apply_terminal_font_to_profiles(&install, font_face, &profile_ids) {
+                Ok(()) => {
+                    let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+                    applied.push(names.join(", "));
+                }
+                Err(e) => errors.push(format!("{}: {e}", first.install_label)),
+            }
+        }
+    }
+
+    let msg = if errors.is_empty() {
+        let mut parts = Vec::new();
+        if applied.is_empty() && instructions.is_empty() {
+            return {
+                app.screen = Screen::InstanceList;
+                app.message =
+                    Some("No changes applied. Select profiles or enable 'Apply to all'.".to_string());
+            };
+        }
+        if !applied.is_empty() {
+            parts.push(format!("✓ Configured font for: {}", applied.join("; ")));
+        }
+        if !instructions.is_empty() {
+            parts.push(format!("ℹ {}", instructions.join("; ")));
+        }
+        parts.join("\n")
+    } else {
+        format!("Partially applied. Errors: {}", errors.join("; "))
+    };
+
+    app.screen = Screen::InstanceList;
+    app.message = Some(msg);
+}
+
+pub(crate) async fn do_install_font(app: &mut App, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    leave_tui(terminal);
+    let result = crate::font::install_nerd_font().await;
+    println!("{}", result.message);
+    println!("\nPress Enter to return to TUI...");
+    let _ = std::io::stdin().read_line(&mut String::new());
+    enter_tui(terminal);
+
+    // After font install, check for terminal installations and offer configuration
+    let installations = crate::font::find_terminals();
+    if !installations.is_empty()
+        && (result.installed_count > 0 || result.already_installed)
+    {
+        app.enter_configure_terminal_font(installations);
+    } else {
+        app.message = Some(result.message.clone());
+    }
+}
+
+pub(crate) fn do_launch(name: &str, app: &mut App, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     let instance_dir = config::instance_dir(&app.settings, name);
     leave_tui(terminal);
 
-    match crate::neovim::launch(&instance_dir, &[]) {
+    // Resolve JS runtime shim
+    let manifest_path = config::InstanceManifest::manifest_path(&instance_dir);
+    let js_runtime_path = config::InstanceManifest::load(&manifest_path)
+        .ok()
+        .and_then(|m| {
+            crate::runtime::setup_runtime_shims(&instance_dir, &m, &app.settings)
+                .map_err(|e| eprintln!("Warning: runtime shim setup failed: {e}"))
+                .ok()
+                .flatten()
+        });
+
+    match crate::neovim::launch(&instance_dir, name, &[], js_runtime_path) {
         Ok(_status) => {
             app.message = Some(format!("Neovim exited for '{name}'."));
         }
@@ -1538,7 +1517,7 @@ fn do_launch(name: &str, app: &mut App, terminal: &mut Terminal<CrosstermBackend
     enter_tui(terminal);
 }
 
-async fn do_update(
+pub(crate) async fn do_update(
     name: &str,
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
