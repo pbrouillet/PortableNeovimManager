@@ -123,14 +123,17 @@ impl MenuBar {
         let bar = Paragraph::new(Line::from(spans))
             .style(Style::default().bg(Color::DarkGray));
         frame.render_widget(bar, area);
+    }
 
-        // Draw dropdown if active
+    /// Draw the dropdown overlay. Must be called AFTER all other content
+    /// so it renders on top (ratatui last-write-wins).
+    pub fn draw_dropdown(&mut self, frame: &mut Frame) {
         if self.state.is_active && self.state.is_dropped {
-            self.draw_dropdown(frame, area);
+            self.draw_dropdown_inner(frame, self.bar_area);
         }
     }
 
-    fn draw_dropdown(&mut self, frame: &mut Frame, bar_area: Rect) {
+    fn draw_dropdown_inner(&mut self, frame: &mut Frame, bar_area: Rect) {
         self.item_rects.clear();
 
         let menu_idx = self.state.current_menu;

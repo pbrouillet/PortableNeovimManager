@@ -81,6 +81,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Screen::InitConfig { name } => draw_init_config(frame, app, name, content),
         Screen::ConfigureTerminalFont => draw_configure_terminal_font(frame, app, content),
     }
+
+    // Draw menu dropdown overlay LAST so it appears on top of all content
+    app.menu_bar.draw_dropdown(frame);
 }
 
 fn draw_instance_list(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
